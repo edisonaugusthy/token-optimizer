@@ -56,13 +56,11 @@ Supported agents:
 ## Commands
 
 ```bash
-token-optimizer status     # Install status and token totals
-token-optimizer stats      # Token savings summary
-token-optimizer update     # Pull latest version and reinstall
-token-optimizer uninstall  # Remove injected configs
+npx token-optimizer status     # Install status and token totals
+npx token-optimizer stats      # Token savings summary
+npx token-optimizer update     # Pull latest version and reinstall
+npx token-optimizer uninstall  # Remove injected configs
 ```
-
-Use `npx token-optimizer install` for first install. After install, use `token-optimizer ...`.
 
 ## Development
 
