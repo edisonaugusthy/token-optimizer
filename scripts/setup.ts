@@ -176,43 +176,33 @@ const MARKER_START = "<!-- token-optimizer start -->";
 const MARKER_END = "<!-- token-optimizer end -->";
 
 function agentsMdBlock(serverPath: string): string {
+  const filterPath = path.join(path.dirname(serverPath), "..", "scripts", "filter.js");
   return `${MARKER_START}
 
 ## Token Optimization (token-optimizer)
 
-To minimize token usage, pipe all shell commands through the token filter:
+Always route shell commands through the token filter:
 
-\`\`\`
-node ${path.join(path.dirname(serverPath), "..", "scripts", "filter.js")} <command> [args...]
-\`\`\`
-
-**Examples:**
 \`\`\`bash
-node ${path.join(path.dirname(serverPath), "..", "scripts", "filter.js")} git status
-node ${path.join(path.dirname(serverPath), "..", "scripts", "filter.js")} git diff
-node ${path.join(path.dirname(serverPath), "..", "scripts", "filter.js")} npm test
-node ${path.join(path.dirname(serverPath), "..", "scripts", "filter.js")} ls -la
+node ${filterPath} <command> [args...]
 \`\`\`
 
-**Rules:**
-- Always use the filter prefix for shell commands
-- The filter preserves exit codes — no behavior change
-- On any error, the filter falls back to raw output safely
+Applies to git, tests, builds, package managers, search/listing commands, Docker/Kubernetes, and any other shell command. The filter preserves exit codes and falls back to raw output on errors. Request raw/full/verbose output when exact logs are required.
 
 ${MARKER_END}`;
+}
+
+function removeManagedAgentsBlocks(content: string): string {
+  const start = MARKER_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const end = MARKER_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return content.replace(new RegExp(`${start}[\\s\\S]*?${end}\\n?`, "g"), "").trimEnd();
 }
 
 function patchAgentsMd(configPath: string, serverPath: string, remove: boolean): boolean {
   let content = "";
   if (fs.existsSync(configPath)) content = fs.readFileSync(configPath, "utf8");
 
-  // Remove existing block
-  const startIdx = content.indexOf(MARKER_START);
-  const endIdx = content.indexOf(MARKER_END);
-  if (startIdx !== -1 && endIdx !== -1) {
-    content = content.slice(0, startIdx) + content.slice(endIdx + MARKER_END.length);
-    content = content.replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
-  }
+  content = removeManagedAgentsBlocks(content);
 
   if (!remove) {
     content = content.trimEnd() + "\n\n" + agentsMdBlock(serverPath) + "\n";

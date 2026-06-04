@@ -74,6 +74,8 @@ export function filterReadOutput(rawOutput: string, workingDirectory: string): R
   // ── 5. For directory reads: collapse entries ─────────────────────────────────
   if (rawOutput.includes("<type>directory</type>")) {
     out = compactDirectoryListing(out)
+  } else {
+    out = compactLargeSourceRead(out)
   }
 
   return savings(rawOutput, out)
@@ -140,6 +142,46 @@ function compactDirectoryListing(output: string): string {
     /<entries>[\s\S]*?<\/entries>/,
     `<entries>\n${compacted.join("\n")}\n</entries>`
   )
+}
+
+/**
+ * For very large source-file reads, keep the structural outline and important
+ * lines instead of sending thousands of body lines back into model history.
+ */
+function compactLargeSourceRead(output: string): string {
+  const allLines = output.split("\n")
+  if (allLines.length <= 260 && output.length <= 16_000) return output
+
+  const pathLine = allLines.find(line => line.startsWith("<path>")) ?? ""
+  const codeLines = allLines.filter(line => !/^<\/?path>/.test(line.trim()))
+  const kept: string[] = []
+  const seen = new Set<number>()
+
+  function keep(index: number): void {
+    if (index < 0 || index >= codeLines.length || seen.has(index)) return
+    seen.add(index)
+    kept.push(`${index + 1}: ${codeLines[index]}`)
+  }
+
+  for (let i = 0; i < codeLines.length; i++) {
+    const line = codeLines[i]
+    if (/^\s*(import|export|from|package|using|namespace)\b/.test(line)) keep(i)
+    if (/^\s*(export\s+)?(async\s+)?(function|class|interface|type|enum|const|let|var)\s+[A-Za-z0-9_$]+/.test(line)) keep(i)
+    if (/^\s*(public|private|protected|static|async)\s+[\w$]+\s*\(/.test(line)) keep(i)
+    if (/\b(TODO|FIXME|HACK|throw new|console\.error|error|failed|deprecated)\b/i.test(line)) keep(i)
+  }
+
+  if (kept.length < 12) return output
+
+  const capped = kept.slice(0, 180)
+  const omitted = Math.max(0, kept.length - capped.length)
+  return [
+    pathLine,
+    `[large source read compacted: ${codeLines.length} lines, ${kept.length} structural/important lines kept]`,
+    ...capped,
+    omitted > 0 ? `[... ${omitted} additional structural/important lines omitted]` : "",
+    "[request a narrower line range or full/raw detail for exact file contents]",
+  ].filter(Boolean).join("\n") + "\n"
 }
 
 /**

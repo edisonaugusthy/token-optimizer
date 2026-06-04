@@ -87,6 +87,37 @@ function truncate(text: string, maxLines: number): string {
   return kept.join("\n")
 }
 
+const IMPORTANT_LINE_RE =
+  /\b(error|failed|failure|fatal|panic|exception|traceback|warning|warn|denied|forbidden|unauthorized|timeout|timed out|not found|cannot|can't|conflict|rejected|invalid|vulnerabilit|deprecated|npm ERR!|npm error|ERR!)\b/i
+
+function uniquePush(target: string[], seen: Set<string>, line: string): void {
+  if (!line || seen.has(line)) return
+  target.push(line)
+  seen.add(line)
+}
+
+function extractImportantLines(ls: string[], maxLines: number): string[] {
+  const important = ls.filter(line => IMPORTANT_LINE_RE.test(line)).slice(0, maxLines)
+  return important
+}
+
+function truncateImportant(text: string, maxLines: number): string {
+  const ls = lines(text)
+  if (ls.length <= maxLines) return text
+
+  const kept: string[] = []
+  const seen = new Set<string>()
+  const important = extractImportantLines(ls, Math.max(4, Math.floor(maxLines * 0.35)))
+
+  for (const line of ls.slice(0, Math.ceil(maxLines * 0.4))) uniquePush(kept, seen, line)
+  for (const line of important) uniquePush(kept, seen, line)
+  for (const line of ls.slice(-Math.ceil(maxLines * 0.25))) uniquePush(kept, seen, line)
+
+  const compact = kept.slice(0, maxLines - 1)
+  compact.push(`... (${ls.length - compact.length} lines omitted; kept head/tail/errors)`)
+  return compact.join("\n")
+}
+
 // ─── Git filters ─────────────────────────────────────────────────────────────
 
 function filterGitStatus(raw: string): FilterResult {
@@ -714,6 +745,65 @@ function filterNpmInstall(raw: string): FilterResult {
 
 // ─── Build script filter (npm run / yarn run / pnpm run) ─────────────────────
 
+function filterPackageMetadata(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const jsonStart = clean.search(/[\[{]/)
+  const jsonEnd = Math.max(clean.lastIndexOf("]"), clean.lastIndexOf("}"))
+  const jsonCandidate = jsonStart >= 0 && jsonEnd > jsonStart
+    ? clean.slice(jsonStart, jsonEnd + 1)
+    : clean
+
+  try {
+    const parsed = JSON.parse(jsonCandidate)
+    const item = Array.isArray(parsed) ? parsed[0] : parsed
+    if (item && typeof item === "object") {
+      const pkg = item as Record<string, unknown>
+      const name = typeof pkg.name === "string" ? pkg.name : ""
+      const version = typeof pkg.version === "string" ? pkg.version : ""
+      const files = Array.isArray(pkg.files) ? pkg.files.length : undefined
+      const linesOut = [
+        name || version ? `${name}${version ? `@${version}` : ""}` : "",
+        typeof pkg.filename === "string" ? `filename: ${pkg.filename}` : "",
+        typeof pkg.size === "number" ? `package size: ${pkg.size} bytes` : "",
+        typeof pkg.unpackedSize === "number" ? `unpacked size: ${pkg.unpackedSize} bytes` : "",
+        typeof pkg.entryCount === "number" ? `total files: ${pkg.entryCount}` : "",
+        files !== undefined ? `files listed: ${files}` : "",
+        typeof pkg.integrity === "string" ? `integrity: ${String(pkg.integrity).slice(0, 32)}...` : "",
+      ].filter(Boolean)
+
+      if (linesOut.length > 0) return savings(raw, linesOut.join("\n"))
+    }
+  } catch {
+    // Non-JSON package output falls through to line filtering.
+  }
+
+  const ls = lines(clean).filter(Boolean)
+  if (ls.length <= 12 && clean.length <= 1200) return savings(raw, clean)
+
+  const kept: string[] = []
+  const seen = new Set<string>()
+  for (const line of ls) {
+    const t = line.trim()
+    if (
+      IMPORTANT_LINE_RE.test(t) ||
+      /^npm (notice|warn|error)/i.test(t) ||
+      /^(name|version|filename|package size|unpacked size|total files|integrity|shasum):/i.test(t) ||
+      /^[-+]?v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(t) ||
+      /^\S+@\d+\.\d+\.\d+/.test(t)
+    ) {
+      uniquePush(kept, seen, t)
+    }
+  }
+
+  if (kept.length === 0) {
+    return savings(raw, truncateImportant(clean, 24))
+  }
+
+  const omitted = Math.max(0, ls.length - kept.length)
+  if (omitted > 0) kept.push(`... (${omitted} package metadata lines omitted)`)
+  return savings(raw, kept.slice(0, 30).join("\n"))
+}
+
 function filterNpmRunScript(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
   const ls = lines(clean)
@@ -835,7 +925,7 @@ function filterXcode(raw: string): FilterResult {
 function filterGeneric(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
   const deduped = deduplicateLines(clean)
-  const truncated = truncate(deduped, 80)
+  const truncated = truncateImportant(deduped, 80)
   return savings(raw, truncated)
 }
 
@@ -883,6 +973,12 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
     (cmd === "yarn" && sub === "run") ||
     (cmd === "pnpm" && sub === "run")
   ) { return filterNpmRunScript(rawOutput) }
+
+  if (
+    (cmd === "npm" && ["pack", "publish", "view", "info", "show", "version"].includes(sub ?? "")) ||
+    (cmd === "yarn" && ["pack", "publish", "info", "npm"].includes(sub ?? "")) ||
+    (cmd === "pnpm" && ["pack", "publish", "view", "info"].includes(sub ?? ""))
+  ) { return filterPackageMetadata(rawOutput) }
 
   // ── pnpm dlx — re-route by the actual executed package ───────────────────
   if (cmd === "pnpm" && sub === "dlx" && sub2) {

@@ -119,31 +119,20 @@ function buildAgentsMdBlock(filterPath: string): string {
 
 ## Token Optimization (opencode-token-saver)
 
-To minimize token usage, pipe all shell commands through the token filter:
+Always route shell commands through the token filter:
 
-\`\`\`
+\`\`\`bash
 node ${filterPath} <command> [args...]
 \`\`\`
 
-**Examples:**
-\`\`\`bash
-node ${filterPath} git status
-node ${filterPath} git diff
-node ${filterPath} npm test
-node ${filterPath} cargo test
-node ${filterPath} ls -la
-node ${filterPath} grep -r "pattern" src/
-node ${filterPath} pytest
-node ${filterPath} docker ps
-\`\`\`
-
-**Rules:**
-- Always use the filter prefix for shell commands
-- The filter preserves exit codes — no behavior change
-- On any error, the filter falls back to raw output safely
-- Do NOT pipe git, test, or build commands directly
+Applies to git, tests, builds, package managers, search/listing commands, Docker/Kubernetes, and any other shell command. The filter preserves exit codes and falls back to raw output on errors. Request raw/full/verbose output when exact logs are required.
 
 ${MARKER_END}`
+}
+
+function removeManagedBlocks(content: string): string {
+  const managedBlock = new RegExp(`${MARKER_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${MARKER_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n?`, "g")
+  return content.replace(managedBlock, "").trimEnd()
 }
 
 function injectAgentsMd(args: InstallArgs): void {
@@ -155,13 +144,7 @@ function injectAgentsMd(args: InstallArgs): void {
     existing = fs.readFileSync(agentsMdPath, "utf-8")
   }
 
-  // Remove existing token-saver block (for re-install / update)
-  const startIdx = existing.indexOf(MARKER_START)
-  const endIdx = existing.indexOf(MARKER_END)
-  if (startIdx !== -1 && endIdx !== -1) {
-    existing = existing.slice(0, startIdx).trimEnd() + "\n" +
-               existing.slice(endIdx + MARKER_END.length).trimStart()
-  }
+  existing = removeManagedBlocks(existing)
 
   const updated = existing.trimEnd() + "\n\n" + block + "\n"
 
@@ -185,16 +168,12 @@ function removeAgentsMd(args: InstallArgs): void {
   }
 
   let content = fs.readFileSync(agentsMdPath, "utf-8")
-  const startIdx = content.indexOf(MARKER_START)
-  const endIdx = content.indexOf(MARKER_END)
-
-  if (startIdx === -1) {
+  if (!content.includes(MARKER_START)) {
     console.log("[token-saver] No token-saver block found in AGENTS.md")
     return
   }
 
-  content = content.slice(0, startIdx).trimEnd() + "\n" +
-            content.slice(endIdx + MARKER_END.length).trimStart()
+  content = removeManagedBlocks(content) + "\n"
 
   if (args.dryRun) {
     console.log(`[dry-run] Would remove token-saver block from ${agentsMdPath}`)

@@ -33,6 +33,8 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
+import * as fs from "node:fs"
+import * as path from "node:path"
 import { filterBashOutput } from "./filters/bash.js"
 import { filterReadOutput, filterEditOutput } from "./filters/read.js"
 import { applySlimDescription, expandLineRange, type EditArgs } from "./schema-slim.js"
@@ -46,8 +48,14 @@ interface SessionStats {
   readsCompacted: number
   editsExpanded: number
   tasksCompressed: number
+  taskPromptsCompressed: number
   webfetchesCompressed: number
+  mcpOutputsCompressed: number
+  browserOutputsCompressed: number
   historyTrimmed: number
+  sessionMemoryInjected: number
+  sessionMemoryWritten: number
+  bySurface: Record<string, { originalTokens: number; filteredTokens: number; count: number }>
 }
 
 function createStats(): SessionStats {
@@ -58,13 +66,129 @@ function createStats(): SessionStats {
     readsCompacted: 0,
     editsExpanded: 0,
     tasksCompressed: 0,
+    taskPromptsCompressed: 0,
     webfetchesCompressed: 0,
+    mcpOutputsCompressed: 0,
+    browserOutputsCompressed: 0,
     historyTrimmed: 0,
+    sessionMemoryInjected: 0,
+    sessionMemoryWritten: 0,
+    bySurface: {},
   }
 }
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4)
+}
+
+function recordSavings(stats: SessionStats, surface: string, original: string, filtered: string): void {
+  stats.originalTokens += estimateTokens(original)
+  stats.filteredTokens += estimateTokens(filtered)
+  const existing = stats.bySurface[surface] ?? { originalTokens: 0, filteredTokens: 0, count: 0 }
+  existing.originalTokens += estimateTokens(original)
+  existing.filteredTokens += estimateTokens(filtered)
+  existing.count++
+  stats.bySurface[surface] = existing
+}
+
+function wantsFullDetail(args: Record<string, unknown> | undefined, raw: string): boolean {
+  const haystack = `${JSON.stringify(args ?? {})}\n${raw.slice(0, 1200)}`.toLowerCase()
+  return /\b(full|raw|verbose|unfiltered|no[-_ ]?filter|include[-_ ]?(logs|console|network|dom|trace|screenshots?)|debug[-_ ]?detail)\b/.test(haystack)
+}
+
+function capText(text: string, maxChars: number, label: string): string {
+  if (text.length <= maxChars) return text
+  const slice = text.slice(0, maxChars)
+  const lastNewline = slice.lastIndexOf("\n")
+  const cutAt = lastNewline > maxChars * 0.85 ? lastNewline : maxChars
+  const dropped = text.length - cutAt
+  return `${text.slice(0, cutAt).trimEnd()}\n[... ${dropped} chars (≈${Math.ceil(dropped / 4)} tokens) omitted from ${label}; request full/raw/verbose detail to bypass]`
+}
+
+function compactTaskPrompt(raw: string): string {
+  let text = raw.replace(/\n{3,}/g, "\n\n").trim()
+  text = text.replace(/# AGENTS\.md instructions[\s\S]*?(?=\n---|\n# |\n[A-Z][^\n]{0,80}:|$)/gi, "[repo agent instructions already available]\n")
+  text = text.replace(/<!-- opencode-token-saver start -->[\s\S]*?<!-- opencode-token-saver end -->/gi, "[token-saver shell rule omitted]\n")
+  text = text.replace(/<INSTRUCTIONS>[\s\S]{800,}?<\/INSTRUCTIONS>/gi, "[long inherited instructions omitted]\n")
+
+  if (text.length <= 3500) return text
+
+  const lines = text.split("\n")
+  const keep = lines.filter(line => {
+    const t = line.trim()
+    return /^(task|goal|objective|files?|constraints?|success|verify|tests?|do not|must|please|implement|fix|review)\b/i.test(t)
+      || /(`[^`]+`|\/[\w./-]+|[A-Za-z]:\\)/.test(t)
+      || /\b(error|failed|exception|regression|todo|requirement)\b/i.test(t)
+  })
+  const compact = keep.length >= 6 ? keep.join("\n") : text
+  return capText(compact, 3500, "task prompt")
+}
+
+function compactBrowserOutput(raw: string): string {
+  const lines = raw.split("\n")
+  const important = lines.filter(line => {
+    const t = line.trim()
+    if (!t) return false
+    if (/\b(error|warning|failed|exception|console\.error|console\.warn|network|request|response|status|404|500|timeout|trace|screenshot|url|selector|aria|role=|name=)\b/i.test(t)) return true
+    if (/^\s*(\d+\.|\-|\*)\s/.test(line) && t.length < 220) return true
+    return false
+  })
+  const source = important.length >= 4 ? important.join("\n") : raw
+  const consoleCount = lines.filter(l => /\bconsole\b/i.test(l)).length
+  const networkCount = lines.filter(l => /\b(request|response|network|status)\b/i.test(l)).length
+  const header = `[browser/computer-use compacted: ${lines.length} lines, console=${consoleCount}, network=${networkCount}]`
+  return `${header}\n${capText(source.replace(/\n{3,}/g, "\n\n").trim(), 4500, "browser output")}`
+}
+
+function compactMcpOutput(tool: string, raw: string): string {
+  let text = raw
+  text = text.replace(/"fp":"[^"]*",?/g, "")
+  text = text.replace(/"sp":"[^"]*",?/g, "")
+  text = text.replace(/"bt":"[^"]{200,}",?/g, "")
+  text = text.replace(/"source":"([^"\\]|\\.){1200,}",?/g, "\"source\":\"[large source omitted; use get_code_snippet/read for exact lines]\",")
+  text = text.replace(/"embedding":\[[^\]]+\],?/g, "")
+  text = text.replace(/\n{3,}/g, "\n\n")
+
+  if (/search_graph|query_graph|trace_path|get_code_snippet|get_architecture|codebase|mcp/i.test(tool)) {
+    return capText(text, 6000, `${tool} MCP output`)
+  }
+  if (/jira|notion|drive|figma|confluence|sheets|slides/i.test(tool)) {
+    const lines = text.split("\n").filter(line =>
+      /\b(id|key|title|name|url|status|owner|assignee|date|updated|summary|file|path|line|component|node|style|token)\b/i.test(line)
+    )
+    return capText((lines.length >= 4 ? lines.join("\n") : text).trim(), 5000, `${tool} MCP output`)
+  }
+  return capText(text, 4000, `${tool} output`)
+}
+
+function sessionMemoryPath(directory: string): string {
+  return path.join(directory, ".token-optimizer", "session-memory.md")
+}
+
+function readSessionMemory(directory: string): string {
+  try {
+    const file = sessionMemoryPath(directory)
+    if (!fs.existsSync(file)) return ""
+    return capText(fs.readFileSync(file, "utf8").trim(), 2500, "session memory")
+  } catch {
+    return ""
+  }
+}
+
+function updateSessionMemory(directory: string, output: string): boolean {
+  const lines = output.split("\n").filter(line =>
+    /\b(changed|modified|created|deleted|implemented|verified|failed|todo|next|decision|constraint|file|test|build|error)\b/i.test(line)
+  )
+  if (lines.length === 0) return false
+  const body = capText(lines.slice(-60).join("\n"), 3000, "session memory")
+  try {
+    const file = sessionMemoryPath(directory)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, `# Token Optimizer Session Memory\n\n${body}\n`)
+    return true
+  } catch {
+    return false
+  }
 }
 
 // ─── Task output compression ──────────────────────────────────────────────────
@@ -302,8 +426,29 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
     // ── 2. Line-range edit expansion (before edit executes) ─────────────────
     "tool.execute.before": async (
       input: { tool: string },
-      output: { args: EditArgs }
+      output: { args: EditArgs & Record<string, unknown> }
     ) => {
+      if (input.tool === "task") {
+        const promptKey = typeof output.args.prompt === "string" ? "prompt"
+          : typeof output.args.description === "string" ? "description"
+          : typeof output.args.message === "string" ? "message"
+          : null
+        if (!promptKey) return
+        const original = String(output.args[promptKey])
+        if (wantsFullDetail(output.args, original)) return
+        const compact = compactTaskPrompt(original)
+        if (compact !== original && estimateTokens(original) - estimateTokens(compact) >= 100) {
+          output.args[promptKey] = compact
+          stats.taskPromptsCompressed++
+          recordSavings(stats, "task_prompt", original, compact)
+          await log("debug", "Compacted sub-agent task prompt", {
+            originalTokens: estimateTokens(original),
+            filteredTokens: estimateTokens(compact),
+          })
+        }
+        return
+      }
+
       if (input.tool !== "edit") return
 
       const oldArgs = output.args
@@ -322,13 +467,14 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
 
     // ── 3. Tool output compression (after tool executes) ────────────────────
     "tool.execute.after": async (
-      input: { tool: string; args?: { command?: string; filePath?: string } },
+      input: { tool: string; args?: { command?: string; filePath?: string } & Record<string, unknown> },
       output: { output: string }
     ) => {
       const originalOutput = output.output ?? ""
       if (!originalOutput) return
 
       const originalTokens = estimateTokens(originalOutput)
+      if (wantsFullDetail(input.args, originalOutput)) return
 
       // ── 3a. Bash output compression ──────────────────────────────────────
       if (input.tool === "bash") {
@@ -338,8 +484,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
         if (result.savedPct >= 10) {
           // Only apply if we actually save meaningful tokens
           output.output = result.output
-          stats.originalTokens += originalTokens
-          stats.filteredTokens += estimateTokens(result.output)
+          recordSavings(stats, "bash", originalOutput, result.output)
           stats.commandsFiltered++
 
           await log("debug", `bash filter: ${result.savedPct}% saved`, {
@@ -357,8 +502,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
 
         if (result.savedPct >= 5) {
           output.output = result.output
-          stats.originalTokens += originalTokens
-          stats.filteredTokens += estimateTokens(result.output)
+          recordSavings(stats, "read", originalOutput, result.output)
           stats.readsCompacted++
         }
         return
@@ -369,8 +513,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
         const compact = filterEditOutput(originalOutput)
         if (compact !== originalOutput) {
           output.output = compact
-          stats.originalTokens += originalTokens
-          stats.filteredTokens += estimateTokens(compact)
+          recordSavings(stats, "edit", originalOutput, compact)
         }
         return
       }
@@ -386,8 +529,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
 
         if (savedPct >= 10) {
           output.output = compressed
-          stats.originalTokens += originalTokens
-          stats.filteredTokens += estimateTokens(compressed)
+          recordSavings(stats, "webfetch", originalOutput, compressed)
           stats.webfetchesCompressed++
 
           await log("debug", `webfetch filter: ${savedPct}% saved`, {
@@ -411,8 +553,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
 
         if (savedPct >= 10) {
           output.output = compressed
-          stats.originalTokens += originalTokens
-          stats.filteredTokens += estimateTokens(compressed)
+          recordSavings(stats, "task", originalOutput, compressed)
           stats.tasksCompressed++
 
           await log("debug", `task filter: ${savedPct}% saved`, {
@@ -433,8 +574,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
           : Math.round(((originalTokens - estimateTokens(compressed)) / originalTokens) * 100)
         if (savedPct >= 10) {
           output.output = compressed
-          stats.originalTokens += originalTokens
-          stats.filteredTokens += estimateTokens(compressed)
+          recordSavings(stats, "glob", originalOutput, compressed)
           await log("debug", `glob filter: ${savedPct}% saved`, {
             originalTokens,
             filteredTokens: estimateTokens(compressed),
@@ -453,8 +593,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
           : Math.round(((originalTokens - estimateTokens(compressed)) / originalTokens) * 100)
         if (savedPct >= 10) {
           output.output = compressed
-          stats.originalTokens += originalTokens
-          stats.filteredTokens += estimateTokens(compressed)
+          recordSavings(stats, "grep", originalOutput, compressed)
           await log("debug", `grep filter: ${savedPct}% saved`, {
             originalTokens,
             filteredTokens: estimateTokens(compressed),
@@ -463,7 +602,48 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
         return
       }
 
-      // ── 3h. Generic fallback cap ──────────────────────────────────────────
+      // ── 3h. Browser/computer-use output compaction ───────────────────────
+      // Keep console errors/warnings, failed network requests, selectors,
+      // URLs, screenshots/traces, and counts. Full logs remain available when
+      // args/output request raw, full, verbose, includeLogs, includeConsole, etc.
+      if (/browser|playwright|computer|screenshot|console|network|dom|accessibility|trace/i.test(input.tool)) {
+        const compressed = compactBrowserOutput(originalOutput)
+        const savedPct = originalTokens === 0
+          ? 0
+          : Math.round(((originalTokens - estimateTokens(compressed)) / originalTokens) * 100)
+        if (savedPct >= 10) {
+          output.output = compressed
+          recordSavings(stats, "browser", originalOutput, compressed)
+          stats.browserOutputsCompressed++
+          await log("debug", `browser/computer-use filter: ${savedPct}% saved`, {
+            tool: input.tool,
+            originalTokens,
+            filteredTokens: estimateTokens(compressed),
+          })
+        }
+        return
+      }
+
+      // ── 3i. MCP/schema-aware compaction ──────────────────────────────────
+      if (/mcp|search_graph|query_graph|trace_path|get_code_snippet|get_architecture|jira|notion|drive|figma|confluence|sheets|slides/i.test(input.tool)) {
+        const compressed = compactMcpOutput(input.tool, originalOutput)
+        const savedPct = originalTokens === 0
+          ? 0
+          : Math.round(((originalTokens - estimateTokens(compressed)) / originalTokens) * 100)
+        if (savedPct >= 10) {
+          output.output = compressed
+          recordSavings(stats, "mcp", originalOutput, compressed)
+          stats.mcpOutputsCompressed++
+          await log("debug", `mcp filter: ${savedPct}% saved`, {
+            tool: input.tool,
+            originalTokens,
+            filteredTokens: estimateTokens(compressed),
+          })
+        }
+        return
+      }
+
+      // ── 3j. Generic fallback cap ──────────────────────────────────────────
       // Any tool not explicitly handled above (MCP tools, search_graph,
       // query_graph, trace_path, get_code_snippet, etc.) gets a hard cap.
       // This prevents any single tool call from flooding the context window
@@ -480,8 +660,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
         const truncated = originalOutput.slice(0, cutAt).trimEnd()
         const dropped = originalOutput.length - cutAt
         output.output = `${truncated}\n[... ${dropped} chars (≈${Math.ceil(dropped / 4)} tokens) truncated — use a narrower query or read specific sections]`
-        stats.originalTokens += originalTokens
-        stats.filteredTokens += estimateTokens(output.output)
+        recordSavings(stats, "generic", originalOutput, output.output)
         await log("debug", `generic cap: ${input.tool} truncated`, {
           originalChars: originalOutput.length,
           cappedChars: cutAt,
@@ -659,6 +838,16 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
           trimmed: stats.historyTrimmed,
         })
       }
+
+      const recentMemorySource = msgs
+        .slice(Math.max(0, totalMsgs - 8))
+        .flatMap(msg => msg.parts)
+        .map(part => part.state?.output ?? "")
+        .filter(Boolean)
+        .join("\n")
+      if (recentMemorySource && updateSessionMemory(directory, recentMemorySource)) {
+        stats.sessionMemoryWritten++
+      }
     },
 
     // ── 6. Trim system prompt boilerplate ────────────────────────────────────
@@ -676,13 +865,21 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
         s = s.replace(/\n{3,}/g, "\n\n")
         return s
       })
+
+      const memory = readSessionMemory(directory)
+      if (memory && !output.system.some(section => section.includes("Token Optimizer Session Memory"))) {
+        output.system.push(`Token Optimizer Session Memory\n${memory}`)
+        stats.sessionMemoryInjected++
+      }
     },
 
     // ── 7. Session stats logging ─────────────────────────────────────────────
     event: async ({ event }: { event: { type: string } }) => {
       if (event.type === "session.idle" && (
         stats.commandsFiltered + stats.webfetchesCompressed + stats.tasksCompressed +
-        stats.readsCompacted + stats.editsExpanded + stats.historyTrimmed
+        stats.taskPromptsCompressed + stats.mcpOutputsCompressed + stats.browserOutputsCompressed +
+        stats.readsCompacted + stats.editsExpanded + stats.historyTrimmed +
+        stats.sessionMemoryInjected + stats.sessionMemoryWritten
       ) > 0) {
         const totalSaved = stats.originalTokens - stats.filteredTokens
         const pct = stats.originalTokens === 0
@@ -694,12 +891,18 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
           readsCompacted: stats.readsCompacted,
           editsExpanded: stats.editsExpanded,
           tasksCompressed: stats.tasksCompressed,
+          taskPromptsCompressed: stats.taskPromptsCompressed,
           webfetchesCompressed: stats.webfetchesCompressed,
+          mcpOutputsCompressed: stats.mcpOutputsCompressed,
+          browserOutputsCompressed: stats.browserOutputsCompressed,
           historyTrimmed: stats.historyTrimmed,
+          sessionMemoryInjected: stats.sessionMemoryInjected,
+          sessionMemoryWritten: stats.sessionMemoryWritten,
           originalTokens: stats.originalTokens,
           filteredTokens: stats.filteredTokens,
           savedTokens: totalSaved,
           savedPct: pct,
+          bySurface: stats.bySurface,
         })
       }
     },

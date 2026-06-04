@@ -89,6 +89,32 @@ function truncate(text: string, maxLines: number): string {
   return kept.join("\n")
 }
 
+const IMPORTANT_LINE_RE =
+  /\b(error|failed|failure|fatal|panic|exception|traceback|warning|warn|denied|forbidden|unauthorized|timeout|timed out|not found|cannot|can't|conflict|rejected|invalid|vulnerabilit|deprecated|npm ERR!|npm error|ERR!)\b/i
+
+function uniquePush(target: string[], seen: Set<string>, line: string): void {
+  if (!line || seen.has(line)) return
+  target.push(line)
+  seen.add(line)
+}
+
+function truncateImportant(text: string, maxLines: number): string {
+  const ls = splitLines(text)
+  if (ls.length <= maxLines) return text
+
+  const kept: string[] = []
+  const seen = new Set<string>()
+  const important = ls.filter(line => IMPORTANT_LINE_RE.test(line)).slice(0, Math.max(4, Math.floor(maxLines * 0.35)))
+
+  for (const line of ls.slice(0, Math.ceil(maxLines * 0.4))) uniquePush(kept, seen, line)
+  for (const line of important) uniquePush(kept, seen, line)
+  for (const line of ls.slice(-Math.ceil(maxLines * 0.25))) uniquePush(kept, seen, line)
+
+  const compact = kept.slice(0, maxLines - 1)
+  compact.push(`... (${ls.length - compact.length} lines omitted; kept head/tail/errors)`)
+  return compact.join("\n")
+}
+
 // ── Git ──────────────────────────────────────────────────────────────────────
 
 function filterGitStatus(raw: string): FilterResult {
@@ -443,9 +469,68 @@ function filterDockerPs(raw: string): FilterResult {
 
 // ── Generic fallback ──────────────────────────────────────────────────────────
 
+function filterPackageMetadata(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const jsonStart = clean.search(/[\[{]/)
+  const jsonEnd = Math.max(clean.lastIndexOf("]"), clean.lastIndexOf("}"))
+  const jsonCandidate = jsonStart >= 0 && jsonEnd > jsonStart
+    ? clean.slice(jsonStart, jsonEnd + 1)
+    : clean
+
+  try {
+    const parsed = JSON.parse(jsonCandidate)
+    const item = Array.isArray(parsed) ? parsed[0] : parsed
+    if (item && typeof item === "object") {
+      const pkg = item as Record<string, unknown>
+      const name = typeof pkg.name === "string" ? pkg.name : ""
+      const version = typeof pkg.version === "string" ? pkg.version : ""
+      const files = Array.isArray(pkg.files) ? pkg.files.length : undefined
+      const linesOut = [
+        name || version ? `${name}${version ? `@${version}` : ""}` : "",
+        typeof pkg.filename === "string" ? `filename: ${pkg.filename}` : "",
+        typeof pkg.size === "number" ? `package size: ${pkg.size} bytes` : "",
+        typeof pkg.unpackedSize === "number" ? `unpacked size: ${pkg.unpackedSize} bytes` : "",
+        typeof pkg.entryCount === "number" ? `total files: ${pkg.entryCount}` : "",
+        files !== undefined ? `files listed: ${files}` : "",
+        typeof pkg.integrity === "string" ? `integrity: ${String(pkg.integrity).slice(0, 32)}...` : "",
+      ].filter(Boolean)
+
+      if (linesOut.length > 0) return savings(raw, linesOut.join("\n"))
+    }
+  } catch {
+    // Non-JSON package output falls through to line filtering.
+  }
+
+  const ls = splitLines(clean).filter(Boolean)
+  if (ls.length <= 12 && clean.length <= 1200) return savings(raw, clean)
+
+  const kept: string[] = []
+  const seen = new Set<string>()
+  for (const line of ls) {
+    const t = line.trim()
+    if (
+      IMPORTANT_LINE_RE.test(t) ||
+      /^npm (notice|warn|error)/i.test(t) ||
+      /^(name|version|filename|package size|unpacked size|total files|integrity|shasum):/i.test(t) ||
+      /^[-+]?v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(t) ||
+      /^\S+@\d+\.\d+\.\d+/.test(t)
+    ) {
+      uniquePush(kept, seen, t)
+    }
+  }
+
+  if (kept.length === 0) {
+    return savings(raw, truncateImportant(clean, 24))
+  }
+
+  const omitted = Math.max(0, ls.length - kept.length)
+  if (omitted > 0) kept.push(`... (${omitted} package metadata lines omitted)`)
+  return savings(raw, kept.slice(0, 30).join("\n"))
+}
+
 function filterGeneric(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  return savings(raw, truncate(deduplicateLines(clean), 80))
+  return savings(raw, truncateImportant(deduplicateLines(clean), 80))
 }
 
 // ── Main router ───────────────────────────────────────────────────────────────
@@ -467,6 +552,12 @@ function filterBashOutput(command: string, rawOutput: string): FilterResult {
       default:                 return filterGeneric(rawOutput)
     }
   }
+
+  if (
+    (cmd === "npm" && ["pack", "publish", "view", "info", "show", "version"].includes(sub ?? "")) ||
+    (cmd === "yarn" && ["pack", "publish", "info", "npm"].includes(sub ?? "")) ||
+    (cmd === "pnpm" && ["pack", "publish", "view", "info"].includes(sub ?? ""))
+  ) return filterPackageMetadata(rawOutput)
 
   if ((cmd === "npm" && sub === "test") ||
       (cmd === "npx" && (sub === "jest" || sub === "vitest" || sub === "mocha")) ||
@@ -513,13 +604,14 @@ interface Stats {
   totalFilteredTokens: number
   commandCount: number
   lastUpdated: string
+  bySurface?: Record<string, { originalTokens: number; filteredTokens: number; count: number }>
 }
 
 function loadStats(): Stats {
   try {
     return JSON.parse(fs.readFileSync(STATS_PATH, "utf-8"))
   } catch {
-    return { totalOriginalTokens: 0, totalFilteredTokens: 0, commandCount: 0, lastUpdated: "" }
+    return { totalOriginalTokens: 0, totalFilteredTokens: 0, commandCount: 0, lastUpdated: "", bySurface: {} }
   }
 }
 
@@ -542,7 +634,30 @@ function showStats(): void {
     `Filtered tokens   : ${s.totalFilteredTokens.toLocaleString()}`,
     `Saved tokens      : ${saved.toLocaleString()} (${pct}%)`,
     `Last updated      : ${s.lastUpdated || "never"}`,
+    ...(s.bySurface ? [
+      "",
+      "By surface:",
+      ...Object.entries(s.bySurface)
+        .sort((a, b) => (b[1].originalTokens - b[1].filteredTokens) - (a[1].originalTokens - a[1].filteredTokens))
+        .map(([name, v]) => {
+          const surfaceSaved = v.originalTokens - v.filteredTokens
+          const surfacePct = v.originalTokens === 0 ? 0 : Math.round((surfaceSaved / v.originalTokens) * 100)
+          return `  ${name}: ${surfaceSaved.toLocaleString()} saved (${surfacePct}%, ${v.count} calls)`
+        }),
+    ] : []),
   ].join("\n") + "\n")
+}
+
+function commandSurface(command: string): string {
+  const [cmd, sub] = command.trim().split(/\s+/)
+  if (cmd === "git") return `git:${sub ?? "other"}`
+  if (cmd === "npm" || cmd === "yarn" || cmd === "pnpm") return `package:${sub ?? "run"}`
+  if (["jest", "vitest", "mocha", "pytest", "cargo", "go", "rspec", "rake"].includes(cmd ?? "")) return "test-build"
+  if (["rg", "grep", "ag", "find", "ls", "tree"].includes(cmd ?? "")) return "search-list"
+  if (["docker", "docker-compose", "kubectl"].includes(cmd ?? "")) return "infra"
+  if (["curl", "wget", "http", "httpie"].includes(cmd ?? "")) return "http"
+  if (["eslint", "tsc", "ruff", "biome"].includes(cmd ?? "")) return "lint"
+  return cmd || "unknown"
 }
 
 function main(): void {
@@ -583,6 +698,13 @@ function main(): void {
     stats.totalFilteredTokens += estimateTokens(finalOutput)
     stats.commandCount++
     stats.lastUpdated = new Date().toISOString()
+    const surface = commandSurface(fullCommand)
+    stats.bySurface ??= {}
+    const existing = stats.bySurface[surface] ?? { originalTokens: 0, filteredTokens: 0, count: 0 }
+    existing.originalTokens += estimateTokens(rawOutput)
+    existing.filteredTokens += estimateTokens(finalOutput)
+    existing.count++
+    stats.bySurface[surface] = existing
     saveStats(stats)
 
     if (process.env["OC_FILTER_DEBUG"] === "1") {
