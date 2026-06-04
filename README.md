@@ -40,7 +40,7 @@ Restart your agent apps and token savings begin immediately.
 ### One-line curl install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/token-optimizer/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main/install.sh | bash
 ```
 
 Options:
@@ -176,7 +176,7 @@ Add to `~/.cursor/mcp.json`, `claude_desktop_config.json`, or `~/.codeium/windsu
 ## Development
 
 ```bash
-git clone https://github.com/YOUR_ORG/token-optimizer
+git clone https://github.com/edisonaugusthy/token-optimizer
 cd token-optimizer
 npm install
 npm run build

@@ -2,7 +2,7 @@
 # install.sh — One-line installer for token-optimizer.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/token-optimizer/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main/install.sh | bash
 #
 # Options (pass after --):
 #   --skip-config   Install the npm package but don't patch agent configs
@@ -17,7 +17,7 @@ main() {
 SKIP_CONFIG=false
 USE_GLOBAL=false
 NPM_PACKAGE="token-optimizer"
-GITHUB_RAW="https://raw.githubusercontent.com/YOUR_ORG/token-optimizer/main"
+GITHUB_RAW="https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main"
 
 for arg in "$@"; do
   case "$arg" in
