@@ -19,6 +19,47 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Use next npm version
+        run: |
+          node <<'NODE'
+          const { execSync } = require("node:child_process");
+          const packageJson = require("./package.json");
+
+          const parseVersion = (version) => version.split(".").map(Number);
+          const compareVersions = (left, right) => {
+            const a = parseVersion(left);
+            const b = parseVersion(right);
+
+            for (let index = 0; index < 3; index += 1) {
+              if (a[index] !== b[index]) {
+                return a[index] - b[index];
+              }
+            }
+
+            return 0;
+          };
+
+          let publishedVersion = "";
+
+          try {
+            publishedVersion = execSync(`npm view ${packageJson.name} version`, {
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "ignore"],
+            }).trim();
+          } catch {
+            publishedVersion = "";
+          }
+
+          if (!publishedVersion || compareVersions(packageJson.version, publishedVersion) > 0) {
+            console.log(`Publishing ${packageJson.name}@${packageJson.version}`);
+            process.exit(0);
+          }
+
+          const [major, minor, patch] = parseVersion(publishedVersion);
+          const nextVersion = `${major}.${minor}.${patch + 1}`;
+          execSync(`npm version ${nextVersion} --no-git-tag-version`, { stdio: "inherit" });
+          NODE
+
       - name: Build
         run: npm run build
 
