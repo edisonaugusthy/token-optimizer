@@ -1,0 +1,53 @@
+{
+  "name": "token-optimizer",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "60-75% token reduction for all AI coding agents (OpenCode, Codex, Cursor, Claude Desktop) via output compression, schema slimming, and read compaction. Runs as a persistent MCP server.",
+  "main": "dist/src/plugin.js",
+  "types": "dist/src/plugin.d.ts",
+  "exports": {
+    ".": "./dist/src/plugin.js",
+    "./mcp-server": "./dist/src/mcp-server.js"
+  },
+  "bin": {
+    "token-optimizer": "dist/scripts/setup.js",
+    "to-filter": "dist/scripts/filter.js",
+    "to-install": "dist/scripts/install-codex.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_ORG/token-optimizer.git"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "start": "node dist/src/mcp-server.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "codex",
+    "cursor",
+    "claude",
+    "mcp",
+    "token",
+    "compression",
+    "plugin",
+    "ai",
+    "llm"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@opencode-ai/plugin": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^5.4.0"
+  },
+  "files": [
+    "dist/",
+    "AGENTS.md",
+    "README.md"
+  ]
+}
