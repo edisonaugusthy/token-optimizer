@@ -15,6 +15,7 @@ It stacks **three complementary techniques**:
 2. **Line-range edit expansion** — Lets the model write `oldString` as `"55-64"` instead of pasting the full lines. Saves output tokens on every edit.
 3. **Tool output compression** — Compresses bash/shell output, file reads, web fetches, and sub-agent task results.
 4. **Gitignore-aware file discovery** — Omits files ignored by Git from glob, grep, and directory-read outputs.
+5. **Concise agent replies** — Adds instructions to avoid tool narration and keep progress/final replies precise.
 
 | Output type | Typical savings |
 |---|---|

@@ -874,6 +874,13 @@ export const TokenOptimizerPlugin: Plugin = async ({ directory, client }) => {
         return s
       })
 
+      if (!output.system.some(section => section.includes("Token Optimizer Response Brevity"))) {
+        output.system.push([
+          "Token Optimizer Response Brevity",
+          "Keep replies short and precise. Do not narrate tool choice, MCP usage, or step-by-step thinking. Use progress updates only when useful. Final replies should include only the result, changed files, and verification.",
+        ].join("\n"))
+      }
+
       const memory = readSessionMemory(directory)
       if (memory && !output.system.some(section => section.includes("Token Optimizer Session Memory"))) {
         output.system.push(`Token Optimizer Session Memory\n${memory}`)

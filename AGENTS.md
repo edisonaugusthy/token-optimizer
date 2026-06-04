@@ -107,4 +107,11 @@ node ~/.config/token-optimizer/filter.js docker ps
 - On any error, the filter falls back to raw output safely
 - Do NOT pipe git, test, or build commands directly
 
+**Response brevity:**
+
+- Do not narrate tool choice, MCP usage, or step-by-step thinking.
+- Progress updates should be one short sentence only when useful.
+- Final replies should include only the result, changed files, and verification.
+- Prefer terse bullets over paragraphs; avoid restating the user's request.
+
 <!-- token-optimizer end -->

@@ -192,6 +192,12 @@ node ${filterPath} <command> [args...]
 
 Applies to git, tests, builds, package managers, search/listing commands, Docker/Kubernetes, and any other shell command. The filter preserves exit codes and falls back to raw output on errors. Request raw/full/verbose output when exact logs are required.
 
+Keep agent replies concise:
+- Do not narrate tool choice, MCP usage, or step-by-step thinking.
+- Progress updates should be one short sentence only when useful.
+- Final replies should include only the result, changed files, and verification.
+- Prefer terse bullets over paragraphs; avoid restating the user's request.
+
 ${MARKER_END}`;
 }
 
