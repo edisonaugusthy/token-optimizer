@@ -1,4 +1,4 @@
-# opencode-token-saver — Codex Agent Instructions
+# token-optimizer — Codex Agent Instructions
 
 This project uses a token filter to reduce LLM context usage by 60-75%.
 
@@ -7,28 +7,28 @@ This project uses a token filter to reduce LLM context usage by 60-75%.
 **Always pipe shell commands through the token filter:**
 
 ```bash
-node ~/.config/token-saver/filter.js <command> [args...]
+node ~/.config/token-optimizer/filter.js <command> [args...]
 ```
 
 ### Required: Use the filter for these command families
 
 | Command type          | Example                                                       |
 | --------------------- | ------------------------------------------------------------- |
-| Git operations        | `node ~/.config/token-saver/filter.js git status`             |
-| Git diff              | `node ~/.config/token-saver/filter.js git diff`               |
-| Git log               | `node ~/.config/token-saver/filter.js git log -n 10`          |
-| Tests (npm/yarn/pnpm) | `node ~/.config/token-saver/filter.js npm test`               |
-| Tests (cargo)         | `node ~/.config/token-saver/filter.js cargo test`             |
-| Tests (pytest)        | `node ~/.config/token-saver/filter.js pytest`                 |
-| Tests (go)            | `node ~/.config/token-saver/filter.js go test ./...`          |
-| Linting (eslint)      | `node ~/.config/token-saver/filter.js eslint src/`            |
-| Linting (tsc)         | `node ~/.config/token-saver/filter.js tsc --noEmit`           |
-| Linting (ruff)        | `node ~/.config/token-saver/filter.js ruff check .`           |
-| Directory listing     | `node ~/.config/token-saver/filter.js ls -la`                 |
-| File search           | `node ~/.config/token-saver/filter.js find . -name "*.ts"`    |
-| Content search        | `node ~/.config/token-saver/filter.js grep -r "pattern" src/` |
-| Docker                | `node ~/.config/token-saver/filter.js docker ps`              |
-| Kubectl               | `node ~/.config/token-saver/filter.js kubectl get pods`       |
+| Git operations        | `node ~/.config/token-optimizer/filter.js git status`             |
+| Git diff              | `node ~/.config/token-optimizer/filter.js git diff`               |
+| Git log               | `node ~/.config/token-optimizer/filter.js git log -n 10`          |
+| Tests (npm/yarn/pnpm) | `node ~/.config/token-optimizer/filter.js npm test`               |
+| Tests (cargo)         | `node ~/.config/token-optimizer/filter.js cargo test`             |
+| Tests (pytest)        | `node ~/.config/token-optimizer/filter.js pytest`                 |
+| Tests (go)            | `node ~/.config/token-optimizer/filter.js go test ./...`          |
+| Linting (eslint)      | `node ~/.config/token-optimizer/filter.js eslint src/`            |
+| Linting (tsc)         | `node ~/.config/token-optimizer/filter.js tsc --noEmit`           |
+| Linting (ruff)        | `node ~/.config/token-optimizer/filter.js ruff check .`           |
+| Directory listing     | `node ~/.config/token-optimizer/filter.js ls -la`                 |
+| File search           | `node ~/.config/token-optimizer/filter.js find . -name "*.ts"`    |
+| Content search        | `node ~/.config/token-optimizer/filter.js grep -r "pattern" src/` |
+| Docker                | `node ~/.config/token-optimizer/filter.js docker ps`              |
+| Kubectl               | `node ~/.config/token-optimizer/filter.js kubectl get pods`       |
 
 ### Safety guarantees
 
@@ -42,7 +42,7 @@ node ~/.config/token-saver/filter.js <command> [args...]
 For any command not listed, still use the filter — it applies generic deduplication:
 
 ```bash
-node ~/.config/token-saver/filter.js <any-command> [args...]
+node ~/.config/token-optimizer/filter.js <any-command> [args...]
 ```
 
 ---
@@ -52,7 +52,7 @@ node ~/.config/token-saver/filter.js <any-command> [args...]
 If the filter is not installed, run:
 
 ```bash
-cd /path/to/opencode-token-saver
+cd /path/to/token-optimizer
 npm run build
 node dist/scripts/install-codex.js
 ```
@@ -60,7 +60,7 @@ node dist/scripts/install-codex.js
 Or use the npm package:
 
 ```bash
-npx opencode-token-saver --install-codex
+npx token-optimizer --install-codex
 ```
 
 ---
@@ -70,34 +70,34 @@ npx opencode-token-saver --install-codex
 View cumulative token savings:
 
 ```bash
-npx token-optimizer stats
+token-optimizer stats
 ```
 
 ---
 
 _This file is managed by token-optimizer. Do not edit the section between the markers._
 
-<!-- opencode-token-saver start -->
+<!-- token-optimizer start -->
 
 ## Token Optimization (token-optimizer)
 
 To minimize token usage, pipe all shell commands through the token filter:
 
 ```
-node ~/.config/token-saver/filter.js <command> [args...]
+node ~/.config/token-optimizer/filter.js <command> [args...]
 ```
 
 **Examples:**
 
 ```bash
-node ~/.config/token-saver/filter.js git status
-node ~/.config/token-saver/filter.js git diff
-node ~/.config/token-saver/filter.js npm test
-node ~/.config/token-saver/filter.js cargo test
-node ~/.config/token-saver/filter.js ls -la
-node ~/.config/token-saver/filter.js grep -r "pattern" src/
-node ~/.config/token-saver/filter.js pytest
-node ~/.config/token-saver/filter.js docker ps
+node ~/.config/token-optimizer/filter.js git status
+node ~/.config/token-optimizer/filter.js git diff
+node ~/.config/token-optimizer/filter.js npm test
+node ~/.config/token-optimizer/filter.js cargo test
+node ~/.config/token-optimizer/filter.js ls -la
+node ~/.config/token-optimizer/filter.js grep -r "pattern" src/
+node ~/.config/token-optimizer/filter.js pytest
+node ~/.config/token-optimizer/filter.js docker ps
 ```
 
 **Rules:**
@@ -107,4 +107,4 @@ node ~/.config/token-saver/filter.js docker ps
 - On any error, the filter falls back to raw output safely
 - Do NOT pipe git, test, or build commands directly
 
-<!-- opencode-token-saver end -->
+<!-- token-optimizer end -->

@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 /**
- * install-codex — Sets up token-saver for Codex
+ * install-codex — Sets up token-optimizer for Codex
  *
  * What this does:
- *   1. Copies the compiled filter.js to ~/.config/token-saver/
+ *   1. Copies the compiled filter.js to ~/.config/token-optimizer/
  *   2. Detects or creates AGENTS.md in the current project directory
- *   3. Appends the token-saver hook instructions if not already present
+ *   3. Appends the token-optimizer hook instructions if not already present
  *
  * Usage:
  *   node dist/scripts/install-codex.js [--global] [--project-dir <path>]
  *
  * Flags:
- *   --global          Install filter binary globally (default: ~/.config/token-saver/)
+ *   --global          Install filter binary globally (default: ~/.config/token-optimizer/)
  *   --project-dir     Target project directory (default: cwd)
  *   --agents-md       Path to AGENTS.md (default: <project-dir>/AGENTS.md)
  *   --dry-run         Print what would be done without making changes
- *   --uninstall       Remove token-saver sections from AGENTS.md
+ *   --uninstall       Remove token-optimizer sections from AGENTS.md
  */
 
 import * as fs from "fs"
@@ -67,7 +67,7 @@ function parseArgs(): InstallArgs {
 
 // ─── Filter installation ──────────────────────────────────────────────────────
 
-const INSTALL_DIR = path.join(os.homedir(), ".config", "token-saver")
+const INSTALL_DIR = path.join(os.homedir(), ".config", "token-optimizer")
 const FILTER_DEST = path.join(INSTALL_DIR, "filter.js")
 
 function installFilter(args: InstallArgs): void {
@@ -77,7 +77,7 @@ function installFilter(args: InstallArgs): void {
     // Try the local scripts directory (when running from source)
     const altSrc = path.join(args.filterSrcDir, "scripts", "filter.js")
     if (!fs.existsSync(altSrc)) {
-      console.error(`[token-saver] ERROR: filter.js not found at ${filterSrc}`)
+      console.error(`[token-optimizer] ERROR: filter.js not found at ${filterSrc}`)
       console.error(`  Run 'npm run build' first to compile the TypeScript source.`)
       process.exit(1)
     }
@@ -106,18 +106,20 @@ function installFilter(args: InstallArgs): void {
     }
   }
 
-  console.log(`[token-saver] Installed filter → ${FILTER_DEST}`)
+  console.log(`[token-optimizer] Installed filter → ${FILTER_DEST}`)
 }
 
 // ─── AGENTS.md injection ──────────────────────────────────────────────────────
 
-const MARKER_START = "<!-- opencode-token-saver start -->"
-const MARKER_END   = "<!-- opencode-token-saver end -->"
+const MARKER_START = "<!-- token-optimizer start -->"
+const MARKER_END   = "<!-- token-optimizer end -->"
+const LEGACY_MARKER_START = "<!-- opencode-" + "token-" + "saver start -->"
+const LEGACY_MARKER_END   = "<!-- opencode-" + "token-" + "saver end -->"
 
 function buildAgentsMdBlock(filterPath: string): string {
   return `${MARKER_START}
 
-## Token Optimization (opencode-token-saver)
+## Token Optimization (token-optimizer)
 
 Always route shell commands through the token filter:
 
@@ -131,8 +133,15 @@ ${MARKER_END}`
 }
 
 function removeManagedBlocks(content: string): string {
-  const managedBlock = new RegExp(`${MARKER_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${MARKER_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n?`, "g")
-  return content.replace(managedBlock, "").trimEnd()
+  for (const [markerStart, markerEnd] of [
+    [MARKER_START, MARKER_END],
+    [LEGACY_MARKER_START, LEGACY_MARKER_END],
+  ]) {
+    const start = markerStart.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    const end = markerEnd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    content = content.replace(new RegExp(`${start}[\\s\\S]*?${end}\\n?`, "g"), "")
+  }
+  return content.trimEnd()
 }
 
 function injectAgentsMd(args: InstallArgs): void {
@@ -157,48 +166,50 @@ function injectAgentsMd(args: InstallArgs): void {
   }
 
   fs.writeFileSync(agentsMdPath, updated)
-  console.log(`[token-saver] Injected hook instructions → ${agentsMdPath}`)
+  console.log(`[token-optimizer] Injected hook instructions → ${agentsMdPath}`)
 }
 
 function removeAgentsMd(args: InstallArgs): void {
   const agentsMdPath = args.agentsMdPath
   if (!fs.existsSync(agentsMdPath)) {
-    console.log("[token-saver] AGENTS.md not found — nothing to remove")
+    console.log("[token-optimizer] AGENTS.md not found — nothing to remove")
     return
   }
 
   let content = fs.readFileSync(agentsMdPath, "utf-8")
   if (!content.includes(MARKER_START)) {
-    console.log("[token-saver] No token-saver block found in AGENTS.md")
+    console.log("[token-optimizer] No token-optimizer block found in AGENTS.md")
     return
   }
 
   content = removeManagedBlocks(content) + "\n"
 
   if (args.dryRun) {
-    console.log(`[dry-run] Would remove token-saver block from ${agentsMdPath}`)
+    console.log(`[dry-run] Would remove token-optimizer block from ${agentsMdPath}`)
     return
   }
 
   fs.writeFileSync(agentsMdPath, content)
-  console.log(`[token-saver] Removed token-saver block from ${agentsMdPath}`)
+  console.log(`[token-optimizer] Removed token-optimizer block from ${agentsMdPath}`)
 }
 
 // ─── Stats command ────────────────────────────────────────────────────────────
 
 function showStats(): void {
   const statsPath = path.join(INSTALL_DIR, "stats.json")
-  if (!fs.existsSync(statsPath)) {
-    console.log("[token-saver] No stats yet — run some commands first")
+  const legacyStatsPath = path.join(os.homedir(), ".config", "token-" + "saver", "stats.json")
+  const existingStatsPath = fs.existsSync(statsPath) ? statsPath : legacyStatsPath
+  if (!fs.existsSync(existingStatsPath)) {
+    console.log("[token-optimizer] No stats yet — run some commands first")
     return
   }
 
-  const stats = JSON.parse(fs.readFileSync(statsPath, "utf-8"))
+  const stats = JSON.parse(fs.readFileSync(existingStatsPath, "utf-8"))
   const saved = stats.totalOriginalTokens - stats.totalFilteredTokens
   const pct = stats.totalOriginalTokens === 0 ? 0 :
     Math.round((saved / stats.totalOriginalTokens) * 100)
 
-  console.log("=== opencode-token-saver stats ===")
+  console.log("=== token-optimizer stats ===")
   console.log(`Commands filtered : ${stats.commandCount}`)
   console.log(`Original tokens   : ${stats.totalOriginalTokens.toLocaleString()}`)
   console.log(`Filtered tokens   : ${stats.totalFilteredTokens.toLocaleString()}`)
@@ -233,7 +244,7 @@ function main(): void {
     return
   }
 
-  console.log("=== opencode-token-saver: Codex installation ===")
+  console.log("=== token-optimizer: Codex installation ===")
   installFilter(args)
 
   // 1. Patch project-local AGENTS.md (or --agents-md if specified)

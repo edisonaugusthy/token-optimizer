@@ -2,14 +2,14 @@
 /**
  * oc-filter — Standalone self-contained CLI token filter for Codex and other agents.
  *
- * This script is designed to be installed standalone at ~/.config/token-saver/filter.js
+ * This script is designed to be installed standalone at ~/.config/token-optimizer/filter.js
  * and has NO external imports — all filter logic is inlined.
  *
  * Usage:
- *   node ~/.config/token-saver/filter.js <command> [args...]
- *   node ~/.config/token-saver/filter.js git status
- *   node ~/.config/token-saver/filter.js npm test
- *   node ~/.config/token-saver/filter.js stats
+ *   node ~/.config/token-optimizer/filter.js <command> [args...]
+ *   node ~/.config/token-optimizer/filter.js git status
+ *   node ~/.config/token-optimizer/filter.js npm test
+ *   node ~/.config/token-optimizer/filter.js stats
  *
  * How it works:
  *   1. Spawns the given command via child_process
@@ -596,8 +596,9 @@ function filterBashOutput(command: string, rawOutput: string): FilterResult {
 // CLI RUNNER
 // ═══════════════════════════════════════════════════════════════════
 
-const INSTALL_DIR = path.join(os.homedir(), ".config", "token-saver")
+const INSTALL_DIR = path.join(os.homedir(), ".config", "token-optimizer")
 const STATS_PATH  = path.join(INSTALL_DIR, "stats.json")
+const LEGACY_STATS_PATH = path.join(os.homedir(), ".config", "token-" + "saver", "stats.json")
 
 interface Stats {
   totalOriginalTokens: number
@@ -609,7 +610,8 @@ interface Stats {
 
 function loadStats(): Stats {
   try {
-    return JSON.parse(fs.readFileSync(STATS_PATH, "utf-8"))
+    const statsPath = fs.existsSync(STATS_PATH) ? STATS_PATH : LEGACY_STATS_PATH
+    return JSON.parse(fs.readFileSync(statsPath, "utf-8"))
   } catch {
     return { totalOriginalTokens: 0, totalFilteredTokens: 0, commandCount: 0, lastUpdated: "", bySurface: {} }
   }
@@ -628,7 +630,7 @@ function showStats(): void {
   const pct = s.totalOriginalTokens === 0 ? 0 :
     Math.round((saved / s.totalOriginalTokens) * 100)
   process.stdout.write([
-    "=== opencode-token-saver stats ===",
+    "=== token-optimizer stats ===",
     `Commands filtered : ${s.commandCount}`,
     `Original tokens   : ${s.totalOriginalTokens.toLocaleString()}`,
     `Filtered tokens   : ${s.totalFilteredTokens.toLocaleString()}`,

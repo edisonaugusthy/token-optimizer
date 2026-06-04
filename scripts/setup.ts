@@ -3,16 +3,17 @@
  * token-optimizer setup script
  *
  * Usage:
- *   npx token-optimizer install   — auto-detect agents and wire MCP config
- *   npx token-optimizer uninstall — remove injected configs
- *   npx token-optimizer status    — show what is installed
- *   npx token-optimizer           — same as "install"
+ *   token-optimizer install   — auto-detect agents and wire MCP config
+ *   token-optimizer uninstall — remove injected configs
+ *   token-optimizer status    — show install status and token totals
+ *   token-optimizer update    — pull latest changes and reinstall
+ *   token-optimizer           — same as "install"
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 
 const HOME = os.homedir();
 const PKG_NAME = "token-optimizer";
@@ -174,6 +175,8 @@ function patchMcpJson(configPath: string, serverPath: string, remove: boolean): 
 
 const MARKER_START = "<!-- token-optimizer start -->";
 const MARKER_END = "<!-- token-optimizer end -->";
+const LEGACY_MARKER_START = "<!-- opencode-" + "token-" + "saver start -->";
+const LEGACY_MARKER_END = "<!-- opencode-" + "token-" + "saver end -->";
 
 function agentsMdBlock(serverPath: string): string {
   const filterPath = path.join(path.dirname(serverPath), "..", "scripts", "filter.js");
@@ -193,9 +196,15 @@ ${MARKER_END}`;
 }
 
 function removeManagedAgentsBlocks(content: string): string {
-  const start = MARKER_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const end = MARKER_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return content.replace(new RegExp(`${start}[\\s\\S]*?${end}\\n?`, "g"), "").trimEnd();
+  for (const [markerStart, markerEnd] of [
+    [MARKER_START, MARKER_END],
+    [LEGACY_MARKER_START, LEGACY_MARKER_END],
+  ]) {
+    const start = markerStart.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const end = markerEnd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    content = content.replace(new RegExp(`${start}[\\s\\S]*?${end}\\n?`, "g"), "");
+  }
+  return content.trimEnd();
 }
 
 function patchAgentsMd(configPath: string, serverPath: string, remove: boolean): boolean {
@@ -241,23 +250,27 @@ interface StatsFile {
   [key: string]: unknown;
 }
 
-function cmdStats(): void {
-  const statsPath = path.join(HOME, ".config", "token-saver", "stats.json");
+function readStats(): { statsPath: string; stats?: StatsFile } {
+  const statsPath = path.join(HOME, ".config", "token-optimizer", "stats.json");
+  const legacyStatsPath = path.join(HOME, ".config", "token-" + "saver", "stats.json");
+  const existingStatsPath = fs.existsSync(statsPath) ? statsPath : legacyStatsPath;
 
-  if (!fs.existsSync(statsPath)) {
-    console.log("No stats yet — run some commands first.");
-    console.log(`(Expected stats file: ${statsPath})`);
-    return;
+  if (!fs.existsSync(existingStatsPath)) {
+    return { statsPath };
   }
 
-  let stats: StatsFile;
   try {
-    stats = JSON.parse(fs.readFileSync(statsPath, "utf-8")) as StatsFile;
+    return {
+      statsPath: existingStatsPath,
+      stats: JSON.parse(fs.readFileSync(existingStatsPath, "utf-8")) as StatsFile,
+    };
   } catch {
-    console.error(`Could not parse stats file at ${statsPath}`);
+    console.error(`Could not parse stats file at ${existingStatsPath}`);
     process.exit(1);
   }
+}
 
+function printStatsSummary(stats: StatsFile): void {
   const orig = stats.totalOriginalTokens ?? 0;
   const filt = stats.totalFilteredTokens ?? 0;
   const saved = orig - filt;
@@ -265,13 +278,25 @@ function cmdStats(): void {
   const count = stats.commandCount ?? 0;
   const updated = stats.lastUpdated ?? "unknown";
 
+  console.log(`Total optimisations: ${count.toLocaleString()}`);
+  console.log(`Original tokens    : ${orig.toLocaleString()}`);
+  console.log(`Filtered tokens    : ${filt.toLocaleString()}`);
+  console.log(`Saved tokens       : ${saved.toLocaleString()} (${pct}%)`);
+  console.log(`Last updated       : ${updated}`);
+}
+
+function cmdStats(): void {
+  const { statsPath, stats } = readStats();
+
+  if (!stats) {
+    console.log("No stats yet — run some commands first.");
+    console.log(`(Expected stats file: ${statsPath})`);
+    return;
+  }
+
   console.log("");
   console.log("=== token-optimizer stats ===");
-  console.log(`Commands filtered : ${count.toLocaleString()}`);
-  console.log(`Original tokens   : ${orig.toLocaleString()}`);
-  console.log(`Filtered tokens   : ${filt.toLocaleString()}`);
-  console.log(`Saved tokens      : ${saved.toLocaleString()} (${pct}%)`);
-  console.log(`Last updated      : ${updated}`);
+  printStatsSummary(stats);
   console.log("");
 }
 
@@ -322,9 +347,50 @@ Restart your AI agent apps to apply the changes.
 The MCP server will start automatically when your agent connects.
 Server entry: ${serverPath}
 
-To verify: run \`npx token-optimizer status\`
-To remove:  run \`npx token-optimizer uninstall\`
+To verify: run \`token-optimizer status\`
+To remove:  run \`token-optimizer uninstall\`
 `);
+}
+
+function runUpdateStep(command: string, args: string[], cwd: string): void {
+  console.log(`\n$ ${[command, ...args].join(" ")}`);
+  const result = spawnSync(command, args, {
+    cwd,
+    stdio: "inherit",
+    shell: false,
+  });
+
+  if (result.error) {
+    console.error(`\nUpdate failed: ${result.error.message}`);
+    process.exit(1);
+  }
+
+  if ((result.status ?? 0) !== 0) {
+    console.error(`\nUpdate failed while running: ${[command, ...args].join(" ")}`);
+    process.exit(result.status ?? 1);
+  }
+}
+
+function packageRoot(): string {
+  return path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+}
+
+function cmdUpdate(): void {
+  console.log("\ntoken-optimizer — update\n");
+
+  const root = packageRoot();
+  if (fs.existsSync(path.join(root, ".git"))) {
+    console.log(`Updating git checkout: ${root}`);
+    runUpdateStep("git", ["pull", "--ff-only"], root);
+    runUpdateStep("npm", ["install"], root);
+    runUpdateStep("npm", ["run", "build"], root);
+    runUpdateStep("npm", ["install", "-g", "."], root);
+  } else {
+    console.log("No git checkout found for this install. Updating from npm instead.");
+    runUpdateStep("npm", ["install", "-g", "token-optimizer@latest"], root);
+  }
+
+  console.log("\nDone. token-optimizer is updated.");
 }
 
 function cmdUninstall(): void {
@@ -359,11 +425,21 @@ function cmdStatus(): void {
       const content = fs.readFileSync(a.configPath, "utf8");
       hasEntry =
         content.includes(PKG_NAME) ||
-        content.includes(MARKER_START);
+        content.includes(MARKER_START) ||
+        content.includes(LEGACY_MARKER_START);
     } catch {
       // ignore
     }
     console.log(`  ${hasEntry ? "✓" : "○"} ${a.name}: ${hasEntry ? "installed" : "config exists but not patched"}`);
+  }
+
+  const { statsPath, stats } = readStats();
+  console.log("\nOptimization totals:");
+  if (stats) {
+    printStatsSummary(stats);
+  } else {
+    console.log("No stats yet — run some commands first.");
+    console.log(`(Expected stats file: ${statsPath})`);
   }
 }
 
@@ -381,6 +457,9 @@ switch (arg) {
   case "status":
     cmdStatus();
     break;
+  case "update":
+    cmdUpdate();
+    break;
   case "stats":
     cmdStats();
     break;
@@ -388,9 +467,10 @@ switch (arg) {
     console.log(`token-optimizer v0.1.0
 
 Usage:
-  npx token-optimizer install    Auto-detect agents and wire MCP config
-  npx token-optimizer uninstall  Remove injected configs
-  npx token-optimizer status     Show what is installed
-  npx token-optimizer stats      Show token savings stats
+  token-optimizer install    Auto-detect agents and wire MCP config
+  token-optimizer uninstall  Remove injected configs
+  token-optimizer status     Show install status and token totals
+  token-optimizer update     Pull latest changes and reinstall
+  token-optimizer stats      Show token savings stats
 `);
 }

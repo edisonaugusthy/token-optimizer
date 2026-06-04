@@ -14,6 +14,7 @@ It stacks **three complementary techniques**:
 1. **Tool schema compression** — Slims built-in tool descriptions sent on every API call (~15–25% savings per request, multiplicative).
 2. **Line-range edit expansion** — Lets the model write `oldString` as `"55-64"` instead of pasting the full lines. Saves output tokens on every edit.
 3. **Tool output compression** — Compresses bash/shell output, file reads, web fetches, and sub-agent task results.
+4. **Gitignore-aware file discovery** — Omits files ignored by Git from glob, grep, and directory-read outputs.
 
 | Output type | Typical savings |
 |---|---|
@@ -95,15 +96,15 @@ Returns the compressed output. The server is stateless and starts in millisecond
 For agents that don't support MCP, use the CLI filter:
 
 ```bash
-node ~/.config/token-saver/filter.js <command> [args...]
+node ~/.config/token-optimizer/filter.js <command> [args...]
 
 # Examples
-node ~/.config/token-saver/filter.js git status
-node ~/.config/token-saver/filter.js git diff
-node ~/.config/token-saver/filter.js npm test
-node ~/.config/token-saver/filter.js grep -r "pattern" src/
-node ~/.config/token-saver/filter.js eslint src/
-node ~/.config/token-saver/filter.js kubectl get pods
+node ~/.config/token-optimizer/filter.js git status
+node ~/.config/token-optimizer/filter.js git diff
+node ~/.config/token-optimizer/filter.js npm test
+node ~/.config/token-optimizer/filter.js grep -r "pattern" src/
+node ~/.config/token-optimizer/filter.js eslint src/
+node ~/.config/token-optimizer/filter.js kubectl get pods
 ```
 
 The filter preserves exit codes and falls back to raw output on any error.
@@ -137,8 +138,10 @@ The filter preserves exit codes and falls back to raw output on any error.
 
 ```bash
 npx token-optimizer install    # Auto-detect agents and wire MCP config
-npx token-optimizer uninstall  # Remove injected configs
-npx token-optimizer status     # Show what is installed
+token-optimizer uninstall      # Remove injected configs
+token-optimizer status         # Show install status and token totals
+token-optimizer update         # Pull latest changes and reinstall
+token-optimizer stats          # Show token savings stats
 ```
 
 ## Manual setup (OpenCode)
@@ -200,7 +203,7 @@ src/
   filters/         Per-output-type filter implementations
 scripts/
   filter.ts        CLI filter for Codex / shell usage
-  setup.ts         npx install/uninstall/status CLI
+  setup.ts         install/uninstall/status/update/stats CLI
   install-codex.ts Codex-specific AGENTS.md patcher
 ```
 

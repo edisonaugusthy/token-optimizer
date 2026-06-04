@@ -12,6 +12,7 @@
  */
 
 import * as path from "path"
+import { filterGitIgnoredPaths, ignoredPathSet } from "../gitignore.js"
 
 export interface ReadFilterResult {
   output: string
@@ -41,6 +42,11 @@ export function filterReadOutput(rawOutput: string, workingDirectory: string): R
   }
 
   let out = rawOutput
+  const readPath = extractReadPath(rawOutput)
+  if (readPath && ignoredPathSet([readPath], workingDirectory).size > 0) {
+    const omitted = `<path>${path.relative(workingDirectory, path.resolve(workingDirectory, readPath))}</path>\n[gitignored file omitted by token-optimizer]\n`
+    return savings(rawOutput, omitted)
+  }
 
   // ── 1. Relativize absolute file path in <path> tag ─────────────────────────
   out = out.replace(/<path>([^<]+)<\/path>/g, (_match, absPath) => {
@@ -73,7 +79,7 @@ export function filterReadOutput(rawOutput: string, workingDirectory: string): R
 
   // ── 5. For directory reads: collapse entries ─────────────────────────────────
   if (rawOutput.includes("<type>directory</type>")) {
-    out = compactDirectoryListing(out)
+    out = compactDirectoryListing(out, workingDirectory)
   } else {
     out = compactLargeSourceRead(out)
   }
@@ -81,21 +87,48 @@ export function filterReadOutput(rawOutput: string, workingDirectory: string): R
   return savings(rawOutput, out)
 }
 
+function extractReadPath(output: string): string | null {
+  const pathMatch = output.match(/<path>([^<]*)<\/path>/)
+  if (!pathMatch) return null
+  return pathMatch[1].trim() || "."
+}
+
 /**
  * For directory read output, collapse deep single-child paths and group
  * large directories into summaries.
  */
-function compactDirectoryListing(output: string): string {
+function compactDirectoryListing(output: string, workingDirectory: string): string {
   // Extract file list between <entries> tags if present
   const entriesMatch = output.match(/<entries>([\s\S]*?)<\/entries>/)
   if (!entriesMatch) return output
 
-  const entries = entriesMatch[1]
+  let entries = entriesMatch[1]
     .split("\n")
     .map(l => l.trim())
     .filter(Boolean)
+  const originalEntryCount = entries.length
 
-  if (entries.length <= 30) return output
+  const directoryPath = extractReadPath(output)
+  if (directoryPath) {
+    const normalizedDirectory = directoryPath.replace(/^\.\//, "")
+    const candidates = entries.map(entry => {
+      const normalizedEntry = entry.replace(/^\.\//, "")
+      if (normalizedEntry === normalizedDirectory || normalizedEntry.startsWith(`${normalizedDirectory}/`)) {
+        return normalizedEntry
+      }
+      return path.posix.join(normalizedDirectory, normalizedEntry)
+    })
+    const keptCandidates = new Set(filterGitIgnoredPaths(candidates, workingDirectory))
+    entries = entries.filter((_entry, index) => keptCandidates.has(candidates[index]))
+  }
+
+  if (entries.length <= 30) {
+    if (entries.length === originalEntryCount) return output
+    return output.replace(
+      /<entries>[\s\S]*?<\/entries>/,
+      `<entries>\n${entries.join("\n")}\n</entries>`
+    )
+  }
 
   // Group by top-level directory
   const byTopDir: Record<string, string[]> = {}

@@ -1,5 +1,5 @@
 /**
- * opencode-token-saver — OpenCode Plugin
+ * token-optimizer — OpenCode Plugin
  *
  * Reduces token usage by 60-75% by stacking four techniques:
  *
@@ -25,11 +25,11 @@
  *      → Never trims the last PROTECTED_TURNS (3) turns.
  *
  * Installation (global):
- *   opencode plugin opencode-token-saver --global
+ *   opencode plugin token-optimizer --global
  *
  * Installation (project):
- *   Place this file in .opencode/plugins/token-saver.ts
- *   (or add "opencode-token-saver" to opencode.json plugins array)
+ *   Place this file in .opencode/plugins/token-optimizer.ts
+ *   (or add "token-optimizer" to opencode.json plugins array)
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -37,6 +37,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { filterBashOutput } from "./filters/bash.js"
 import { filterReadOutput, filterEditOutput } from "./filters/read.js"
+import { filterGitIgnoredPaths } from "./gitignore.js"
 import { applySlimDescription, expandLineRange, type EditArgs } from "./schema-slim.js"
 
 // ─── Token tracking (session-level stats) ────────────────────────────────────
@@ -108,7 +109,9 @@ function capText(text: string, maxChars: number, label: string): string {
 function compactTaskPrompt(raw: string): string {
   let text = raw.replace(/\n{3,}/g, "\n\n").trim()
   text = text.replace(/# AGENTS\.md instructions[\s\S]*?(?=\n---|\n# |\n[A-Z][^\n]{0,80}:|$)/gi, "[repo agent instructions already available]\n")
-  text = text.replace(/<!-- opencode-token-saver start -->[\s\S]*?<!-- opencode-token-saver end -->/gi, "[token-saver shell rule omitted]\n")
+  for (const marker of ["token-optimizer", "opencode-" + "token-" + "saver"]) {
+    text = text.replace(new RegExp(`<!-- ${marker} start -->[\\s\\S]*?<!-- ${marker} end -->`, "gi"), "[token-optimizer shell rule omitted]\n")
+  }
   text = text.replace(/<INSTRUCTIONS>[\s\S]{800,}?<\/INSTRUCTIONS>/gi, "[long inherited instructions omitted]\n")
 
   if (text.length <= 3500) return text
@@ -285,9 +288,11 @@ function compressTaskOutput(raw: string): string {
  *   one-line summary: "src/filters/ (12 files: *.ts ×8, *.js ×4)"
  * - Hard cap at 3000 chars.
  */
-function compressGlobOutput(raw: string): string {
-  const lines = raw.split("\n").map(l => l.trim()).filter(Boolean)
-  if (lines.length <= 40) return raw
+function compressGlobOutput(raw: string, workingDirectory: string): string {
+  const rawLines = raw.split("\n").map(l => l.trim()).filter(Boolean)
+  const lines = filterGitIgnoredPaths(rawLines, workingDirectory)
+  if (lines.length === 0) return "[all glob matches are ignored by git]\n"
+  if (lines.length <= 40) return lines.length === rawLines.length ? raw : `${lines.join("\n")}\n`
 
   // Group by top-level dir (first two path segments)
   const dirs = new Map<string, string[]>()
@@ -329,7 +334,7 @@ function compressGlobOutput(raw: string): string {
  * - Per file: keep first 3 matches + last 1, collapse the rest to a count.
  * - Hard cap at 3000 chars total.
  */
-function compressGrepOutput(raw: string): string {
+function compressGrepOutput(raw: string, workingDirectory: string): string {
   // Strip ANSI codes
   const clean = raw.replace(/\x1b\[[0-9;]*m/g, "")
   const lines = clean.split("\n")
@@ -347,7 +352,9 @@ function compressGrepOutput(raw: string): string {
 
   const MAX_PER_FILE_SHOW = 3
   const out: string[] = []
+  const visibleFiles = new Set(filterGitIgnoredPaths(order, workingDirectory))
   for (const file of order) {
+    if (!visibleFiles.has(file)) continue
     const matches = byFile.get(file)!
     if (matches.length <= MAX_PER_FILE_SHOW + 1) {
       out.push(...matches)
@@ -360,13 +367,14 @@ function compressGrepOutput(raw: string): string {
   }
 
   let result = out.join("\n")
+  if (!result) return "[all grep matches are ignored by git]\n"
   if (result.length > 3000) result = result.slice(0, 3000) + "\n[grep output truncated]"
   return result
 }
 
 // ─── Plugin definition ────────────────────────────────────────────────────────
 
-export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
+export const TokenOptimizerPlugin: Plugin = async ({ directory, client }) => {
   const stats = createStats()
 
   /**
@@ -377,7 +385,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
     try {
       await client.app.log({
         body: {
-          service: "opencode-token-saver",
+          service: "token-optimizer",
           level,
           message,
           extra: extra ?? {},
@@ -568,7 +576,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
       // glob returns one file path per line. Long lists are compacted by
       // grouping into directory summaries when >40 entries are returned.
       if (input.tool === "glob") {
-        const compressed = compressGlobOutput(originalOutput)
+        const compressed = compressGlobOutput(originalOutput, directory)
         const savedPct = originalTokens === 0
           ? 0
           : Math.round(((originalTokens - estimateTokens(compressed)) / originalTokens) * 100)
@@ -587,7 +595,7 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
       // grep returns file:line:content triples. We deduplicate same-file
       // matches (keeping first and last) and cap total output at 3000 chars.
       if (input.tool === "grep") {
-        const compressed = compressGrepOutput(originalOutput)
+        const compressed = compressGrepOutput(originalOutput, directory)
         const savedPct = originalTokens === 0
           ? 0
           : Math.round(((originalTokens - estimateTokens(compressed)) / originalTokens) * 100)
@@ -909,4 +917,4 @@ export const TokenSaverPlugin: Plugin = async ({ directory, client }) => {
   }
 }
 
-export default TokenSaverPlugin
+export default TokenOptimizerPlugin
