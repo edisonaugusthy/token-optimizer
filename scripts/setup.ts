@@ -19,7 +19,6 @@ const HOME = os.homedir();
 const IS_WINDOWS = process.platform === "win32";
 const PKG_NAME = "token-optimizer";
 const SERVER_ENTRY = "dist/src/mcp-server.js";
-const PLUGIN_ENTRY = "dist/src/plugin.js";
 
 // ── URL pathname → filesystem path (handles Windows /C:/... prefix) ───────────
 
@@ -185,7 +184,7 @@ const MCP_ENTRY = (serverPath: string) => ({
   args: [serverPath],
 });
 
-function patchOpenCodeJson(configPath: string, serverPath: string, pluginPath: string, remove: boolean): boolean {
+function patchOpenCodeJson(configPath: string, serverPath: string, remove: boolean): boolean {
   let raw = "{}";
   if (fs.existsSync(configPath)) raw = fs.readFileSync(configPath, "utf8");
 
@@ -213,22 +212,22 @@ function patchOpenCodeJson(configPath: string, serverPath: string, pluginPath: s
     servers[PKG_NAME] = MCP_ENTRY(serverPath);
   }
 
-  // ── Plugin entry (absolute path to plugin.js in the "plugin" array) ─────────
-  // OpenCode resolves plugin entries as absolute paths — package names only work
-  // if the package is locally installed, which it won't be for global installs.
+  // ── Plugin entry (package name in the "plugin" array) ───────────────────────
+  // OpenCode installs npm plugins automatically via Bun at startup and caches
+  // them in ~/.cache/opencode/node_modules/. Use the package name, not a path.
   if (!Array.isArray(cfg.plugin)) {
     cfg.plugin = [];
   }
   const plugins = cfg.plugin as string[];
-  // Remove any stale entries (old package-name form or old path)
+  // Remove any stale absolute-path entries written by older versions
   const filtered = plugins.filter(
-    (p) => p !== PKG_NAME && p !== pluginPath
+    (p) => p !== PKG_NAME && !p.includes(path.join(PKG_NAME, "dist"))
   );
 
   if (remove) {
     cfg.plugin = filtered;
   } else {
-    cfg.plugin = [...filtered, pluginPath];
+    cfg.plugin = [...filtered, PKG_NAME];
   }
 
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -321,14 +320,9 @@ function patchAgentsMd(configPath: string, serverPath: string, remove: boolean):
 
 function patchAgent(agent: AgentConfig, serverPath: string, remove: boolean): void {
   let ok = false;
-  // Derive plugin path from server path: same package root, different entry file.
-  const pluginPath = serverPath.replace(
-    SERVER_ENTRY.replace(/\//g, path.sep),
-    PLUGIN_ENTRY.replace(/\//g, path.sep),
-  );
   switch (agent.type) {
     case "opencode-json":
-      ok = patchOpenCodeJson(agent.configPath, serverPath, pluginPath, remove);
+      ok = patchOpenCodeJson(agent.configPath, serverPath, remove);
       break;
     case "mcp-json":
       ok = patchMcpJson(agent.configPath, serverPath, remove);
