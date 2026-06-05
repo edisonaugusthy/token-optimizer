@@ -224,14 +224,18 @@ function patchOpenCodeJson(configPath: string, serverPath: string, remove: boole
     mcp[PKG_NAME] = OPENCODE_MCP_ENTRY(serverPath);
   }
 
-  // ── Plugin entry — clean up any stale entries written by older versions ──────
-  // The plugin.ts hooks are not yet compatible with the current @opencode-ai/plugin
-  // API and crash OpenCode on startup. Remove any entries we may have written.
-  if (Array.isArray(cfg.plugin)) {
-    cfg.plugin = (cfg.plugin as string[]).filter(
-      (p) => p !== PKG_NAME && !p.includes(path.join(PKG_NAME, "dist"))
-    );
-    if ((cfg.plugin as string[]).length === 0) delete cfg.plugin;
+  // ── Plugin entry ─────────────────────────────────────────────────────────────
+  // OpenCode installs npm plugins via Bun at startup. Use the package name.
+  // Clean up any stale absolute-path entries written by older versions first.
+  if (!Array.isArray(cfg.plugin)) cfg.plugin = [];
+  const plugins = (cfg.plugin as string[]).filter(
+    (p) => p !== PKG_NAME && !p.includes(path.join(PKG_NAME, "dist"))
+  );
+  if (remove) {
+    cfg.plugin = plugins;
+    if (plugins.length === 0) delete cfg.plugin;
+  } else {
+    cfg.plugin = [...plugins, PKG_NAME];
   }
 
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
