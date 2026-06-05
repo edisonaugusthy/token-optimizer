@@ -16,31 +16,84 @@ import * as os from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 
 const HOME = os.homedir();
+const IS_WINDOWS = process.platform === "win32";
 const PKG_NAME = "token-optimizer";
 const SERVER_ENTRY = "dist/src/mcp-server.js";
+
+// ── URL pathname → filesystem path (handles Windows /C:/... prefix) ───────────
+
+function urlToPath(fileUrl: string): string {
+  // On Windows, new URL(import.meta.url).pathname yields /C:/Users/...
+  // Strip the leading slash so path.resolve works correctly.
+  if (IS_WINDOWS && /^\/[A-Za-z]:\//.test(fileUrl)) {
+    return fileUrl.slice(1);
+  }
+  return fileUrl;
+}
 
 // ── Resolve the absolute path to the installed package's server entry ─────────
 
 function resolveServerPath(): string {
-  // When run via npx, __dirname is inside the package. Walk up to find package root.
-  const here = new URL(import.meta.url).pathname;
-  // here = .../token-optimizer/dist/scripts/setup.js  (after build)
-  // or .../token-optimizer/scripts/setup.ts (ts-node / development)
-  const pkgRoot = path.resolve(path.dirname(here), "..", "..");
-  const candidate = path.join(pkgRoot, SERVER_ENTRY);
-  if (fs.existsSync(candidate)) return candidate;
-
-  // Fallback: try resolving from global node_modules
+  // 1. Prefer a stable globally-installed path (npm install -g token-optimizer).
+  //    Check common global prefixes so the path survives npx cache eviction.
+  const globalPrefixes: string[] = [];
   try {
-    const resolved = execSync(`node -e "console.log(require.resolve('token-optimizer/mcp-server'))"`, {
-      encoding: "utf8",
-    }).trim();
-    if (resolved) return resolved;
-  } catch {
-    // ignore
+    const npmPrefix = execSync("npm config get prefix", { encoding: "utf8" }).trim();
+    if (npmPrefix) globalPrefixes.push(npmPrefix);
+  } catch { /* ignore */ }
+
+  if (IS_WINDOWS) {
+    // Windows: npm global installs land in <prefix>\node_modules (no "lib" segment).
+    // Also check APPDATA and LOCALAPPDATA locations.
+    const APPDATA = process.env.APPDATA ?? path.join(HOME, "AppData", "Roaming");
+    const LOCALAPPDATA = process.env.LOCALAPPDATA ?? path.join(HOME, "AppData", "Local");
+    globalPrefixes.push(
+      path.join(APPDATA, "npm"),
+      path.join(LOCALAPPDATA, "npm"),
+    );
+    for (const prefix of globalPrefixes) {
+      const candidate = path.join(prefix, "node_modules", PKG_NAME, SERVER_ENTRY);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } else {
+    // macOS / Linux: npm global installs land in <prefix>/lib/node_modules.
+    globalPrefixes.push(
+      path.join(HOME, ".npm-global"),
+      "/usr/local",
+      "/usr",
+    );
+    for (const prefix of globalPrefixes) {
+      const candidate = path.join(prefix, "lib", "node_modules", PKG_NAME, SERVER_ENTRY);
+      if (fs.existsSync(candidate)) return candidate;
+    }
   }
 
-  // Last resort: return the relative path and hope the cwd is the package root
+  // 2. If the current package root is NOT inside an npx cache, use it directly.
+  //    (Covers: local dev, global install run directly, local npm install.)
+  const here = urlToPath(new URL(import.meta.url).pathname);
+  const pkgRoot = path.resolve(path.dirname(here), "..", "..");
+  const pkgRootNorm = pkgRoot.replace(/\\/g, "/");
+  const isNpxCache =
+    pkgRootNorm.includes("/_npx/") ||
+    pkgRootNorm.includes(".npm/_npx") ||
+    pkgRootNorm.toLowerCase().includes("\\npm\\npx\\") ||  // Windows npx cache
+    pkgRootNorm.toLowerCase().includes("/npm/npx/");
+  if (!isNpxCache) {
+    const candidate = path.join(pkgRoot, SERVER_ENTRY);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  // 3. Fallback: resolve via node require (may still be npx cache, but better than nothing)
+  try {
+    const resolved = execSync(
+      `node -e "console.log(require.resolve('token-optimizer/mcp-server'))"`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { encoding: "utf8", shell: IS_WINDOWS } as any,
+    ).trim();
+    if (resolved) return resolved;
+  } catch { /* ignore */ }
+
+  // 4. Last resort
   return path.resolve(process.cwd(), SERVER_ENTRY);
 }
 
@@ -54,28 +107,36 @@ interface AgentConfig {
 }
 
 function detectAgents(): AgentConfig[] {
+  const APPDATA = process.env.APPDATA ?? path.join(HOME, "AppData", "Roaming");
+  const LOCALAPPDATA = process.env.LOCALAPPDATA ?? path.join(HOME, "AppData", "Local");
+
   const candidates: AgentConfig[] = [
+    // ── OpenCode ──────────────────────────────────────────────────────────────
     {
       name: "OpenCode",
-      configPath: path.join(HOME, ".config", "opencode", "opencode.json"),
+      // macOS/Linux: ~/.config/opencode/opencode.json
+      // Windows:     %APPDATA%\opencode\opencode.json
+      configPath: IS_WINDOWS
+        ? path.join(APPDATA, "opencode", "opencode.json")
+        : path.join(HOME, ".config", "opencode", "opencode.json"),
       type: "opencode-json",
       exists: false,
     },
+    // ── Cursor ────────────────────────────────────────────────────────────────
     {
       name: "Cursor",
-      configPath: path.join(HOME, ".cursor", "mcp.json"),
+      // macOS/Linux: ~/.cursor/mcp.json
+      // Windows:     %APPDATA%\Cursor\mcp.json
+      configPath: IS_WINDOWS
+        ? path.join(APPDATA, "Cursor", "mcp.json")
+        : path.join(HOME, ".cursor", "mcp.json"),
       type: "mcp-json",
       exists: false,
     },
+    // ── Claude Desktop ────────────────────────────────────────────────────────
     {
       name: "Claude Desktop (macOS)",
-      configPath: path.join(
-        HOME,
-        "Library",
-        "Application Support",
-        "Claude",
-        "claude_desktop_config.json"
-      ),
+      configPath: path.join(HOME, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
       type: "mcp-json",
       exists: false,
     },
@@ -86,11 +147,21 @@ function detectAgents(): AgentConfig[] {
       exists: false,
     },
     {
-      name: "Windsurf",
-      configPath: path.join(HOME, ".codeium", "windsurf", "mcp_config.json"),
+      name: "Claude Desktop (Windows)",
+      configPath: path.join(APPDATA, "Claude", "claude_desktop_config.json"),
       type: "mcp-json",
       exists: false,
     },
+    // ── Windsurf ──────────────────────────────────────────────────────────────
+    {
+      name: "Windsurf",
+      configPath: IS_WINDOWS
+        ? path.join(APPDATA, "Codeium", "windsurf", "mcp_config.json")
+        : path.join(HOME, ".codeium", "windsurf", "mcp_config.json"),
+      type: "mcp-json",
+      exists: false,
+    },
+    // ── Codex ─────────────────────────────────────────────────────────────────
     {
       name: "Codex (global AGENTS.md)",
       configPath: path.join(HOME, ".codex", "AGENTS.md"),
@@ -125,6 +196,7 @@ function patchOpenCodeJson(configPath: string, serverPath: string, remove: boole
     return false;
   }
 
+  // ── MCP server entry ────────────────────────────────────────────────────────
   if (!cfg.mcp || typeof cfg.mcp !== "object") {
     cfg.mcp = {};
   }
@@ -138,6 +210,20 @@ function patchOpenCodeJson(configPath: string, serverPath: string, remove: boole
     delete servers[PKG_NAME];
   } else {
     servers[PKG_NAME] = MCP_ENTRY(serverPath);
+  }
+
+  // ── Plugin entry (npm package name in the "plugin" array) ──────────────────
+  // OpenCode loads npm plugins listed in opencode.json under "plugin": [...].
+  if (!Array.isArray(cfg.plugin)) {
+    cfg.plugin = [];
+  }
+  const plugins = cfg.plugin as string[];
+  const pluginIdx = plugins.indexOf(PKG_NAME);
+
+  if (remove) {
+    if (pluginIdx !== -1) plugins.splice(pluginIdx, 1);
+  } else {
+    if (pluginIdx === -1) plugins.push(PKG_NAME);
   }
 
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -363,7 +449,8 @@ function runUpdateStep(command: string, args: string[], cwd: string): void {
   const result = spawnSync(command, args, {
     cwd,
     stdio: "inherit",
-    shell: false,
+    // On Windows, npm/git are .cmd wrappers and require shell:true to resolve.
+    shell: IS_WINDOWS,
   });
 
   if (result.error) {
@@ -378,7 +465,7 @@ function runUpdateStep(command: string, args: string[], cwd: string): void {
 }
 
 function packageRoot(): string {
-  return path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+  return path.resolve(path.dirname(urlToPath(new URL(import.meta.url).pathname)), "..", "..");
 }
 
 function cmdUpdate(): void {
