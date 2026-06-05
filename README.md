@@ -27,31 +27,41 @@ Typical savings:
 
 ## Install
 
-Choose one:
+**Recommended — global install (stable path across npx cache evictions):**
 
-**A. npm / npx**
+```bash
+npm install -g token-optimizer
+token-optimizer install
+```
+
+**Or via npx (no prior install needed):**
 
 ```bash
 npx token-optimizer install
 ```
 
-**B. curl**
+**Or via curl (macOS / Linux):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main/install.sh | bash
 ```
 
-Both options detect supported agents and patch their config automatically.
+All options detect installed agents and patch their configs automatically.
 
-Supported agents:
+Supported agents and platforms:
 
-| Agent          | Integration                           |
-| -------------- | ------------------------------------- |
-| OpenCode       | MCP server plus plugin hooks          |
-| Cursor         | MCP server                            |
-| Claude Desktop | MCP server                            |
-| Windsurf       | MCP server                            |
-| Codex          | `AGENTS.md` shell-filter instructions |
+| Agent                  | macOS / Linux                         | Windows                                     |
+| ---------------------- | ------------------------------------- | ------------------------------------------- |
+| OpenCode               | MCP server + `plugin` array entry     | MCP server + `plugin` array entry           |
+| Cursor                 | MCP server (`~/.cursor/mcp.json`)     | MCP server (`%APPDATA%\Cursor\mcp.json`)    |
+| Claude Desktop         | MCP server (Application Support)      | MCP server (`%APPDATA%\Claude\...`)         |
+| Windsurf               | MCP server (`~/.codeium/windsurf/...`)| MCP server (`%APPDATA%\Codeium\windsurf\...`)|
+| Codex                  | `AGENTS.md` shell-filter instructions | `AGENTS.md` shell-filter instructions       |
+
+> **Why global install?** When run via `npx`, the resolved package path points to
+> the volatile npx cache (`~/.npm/_npx/...` on macOS/Linux, `%LOCALAPPDATA%\npm-cache\npx\...`
+> on Windows). A global install (`npm install -g`) writes a stable path that survives
+> cache evictions and npm upgrades.
 
 ## Commands
 
