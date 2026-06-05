@@ -1,7 +1,7 @@
 {
   "name": "token-optimizer",
   "type": "module",
-  "version": "0.1.1",
+  "version": "0.1.7",
   "description": "60-75% token reduction for all AI coding agents (OpenCode, Codex, Cursor, Claude Desktop) via output compression, schema slimming, and read compaction. Runs as a persistent MCP server.",
   "main": "dist/src/plugin.js",
   "types": "dist/src/plugin.d.ts",
