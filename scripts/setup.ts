@@ -179,6 +179,14 @@ function detectAgents(): AgentConfig[] {
 
 // ── Patchers ──────────────────────────────────────────────────────────────────
 
+// OpenCode MCP entry format (matches opencode.json schema)
+const OPENCODE_MCP_ENTRY = (serverPath: string) => ({
+  enabled: true,
+  type: "local",
+  command: ["node", serverPath],
+});
+
+// Other agents (Cursor, Claude Desktop, Windsurf) use the flat { command, args } shape
 const MCP_ENTRY = (serverPath: string) => ({
   command: "node",
   args: [serverPath],
@@ -197,19 +205,23 @@ function patchOpenCodeJson(configPath: string, serverPath: string, remove: boole
   }
 
   // ── MCP server entry ────────────────────────────────────────────────────────
+  // OpenCode schema: mcp entries sit directly under the "mcp" key, NOT mcp.servers.
   if (!cfg.mcp || typeof cfg.mcp !== "object") {
     cfg.mcp = {};
   }
   const mcp = cfg.mcp as Record<string, unknown>;
-  if (!mcp.servers || typeof mcp.servers !== "object") {
-    mcp.servers = {};
+
+  // Clean up stale mcp.servers entries written by older versions
+  if (mcp.servers && typeof mcp.servers === "object") {
+    const servers = mcp.servers as Record<string, unknown>;
+    delete servers[PKG_NAME];
+    if (Object.keys(servers).length === 0) delete mcp.servers;
   }
-  const servers = mcp.servers as Record<string, unknown>;
 
   if (remove) {
-    delete servers[PKG_NAME];
+    delete mcp[PKG_NAME];
   } else {
-    servers[PKG_NAME] = MCP_ENTRY(serverPath);
+    mcp[PKG_NAME] = OPENCODE_MCP_ENTRY(serverPath);
   }
 
   // ── Plugin entry — clean up any stale entries written by older versions ──────
