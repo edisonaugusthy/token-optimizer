@@ -374,7 +374,7 @@ function compressGrepOutput(raw: string, workingDirectory: string): string {
 
 // ─── Plugin definition ────────────────────────────────────────────────────────
 
-export const TokenOptimizerPlugin: Plugin = async ({ directory, client }) => {
+export const server: Plugin = async ({ directory, client }) => {
   const stats = createStats()
 
   /**
@@ -924,4 +924,4 @@ export const TokenOptimizerPlugin: Plugin = async ({ directory, client }) => {
   }
 }
 
-export default TokenOptimizerPlugin
+export default server
