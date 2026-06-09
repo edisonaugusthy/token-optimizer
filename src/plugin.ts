@@ -184,10 +184,17 @@ function updateSessionMemory(directory: string, output: string): boolean {
   )
   if (lines.length === 0) return false
   const body = capText(lines.slice(-60).join("\n"), 3000, "session memory")
+  const content = `# Token Optimizer Session Memory\n\n${body}\n`
   try {
     const file = sessionMemoryPath(directory)
+    if (fs.existsSync(file)) {
+      const existing = fs.readFileSync(file, "utf8")
+      if (existing === content) {
+        return false // Return false to indicate no file write was needed
+      }
+    }
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, `# Token Optimizer Session Memory\n\n${body}\n`)
+    fs.writeFileSync(file, content)
     return true
   } catch {
     return false

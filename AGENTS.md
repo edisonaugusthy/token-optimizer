@@ -12,8 +12,8 @@ node ~/.config/token-optimizer/filter.js <command> [args...]
 
 ### Required: Use the filter for these command families
 
-| Command type          | Example                                                       |
-| --------------------- | ------------------------------------------------------------- |
+| Command type          | Example                                                           |
+| --------------------- | ----------------------------------------------------------------- |
 | Git operations        | `node ~/.config/token-optimizer/filter.js git status`             |
 | Git diff              | `node ~/.config/token-optimizer/filter.js git diff`               |
 | Git log               | `node ~/.config/token-optimizer/filter.js git log -n 10`          |
@@ -81,33 +81,15 @@ _This file is managed by token-optimizer. Do not edit the section between the ma
 
 ## Token Optimization (token-optimizer)
 
-To minimize token usage, pipe all shell commands through the token filter:
+Always route shell commands through the token filter:
 
-```
+```bash
 node ~/.config/token-optimizer/filter.js <command> [args...]
 ```
 
-**Examples:**
+Applies to git, tests, builds, package managers, search/listing commands, Docker/Kubernetes, and any other shell command. The filter preserves exit codes and falls back to raw output on errors. Request raw/full/verbose output when exact logs are required.
 
-```bash
-node ~/.config/token-optimizer/filter.js git status
-node ~/.config/token-optimizer/filter.js git diff
-node ~/.config/token-optimizer/filter.js npm test
-node ~/.config/token-optimizer/filter.js cargo test
-node ~/.config/token-optimizer/filter.js ls -la
-node ~/.config/token-optimizer/filter.js grep -r "pattern" src/
-node ~/.config/token-optimizer/filter.js pytest
-node ~/.config/token-optimizer/filter.js docker ps
-```
-
-**Rules:**
-
-- Always use the filter prefix for shell commands
-- The filter preserves exit codes — no behavior change
-- On any error, the filter falls back to raw output safely
-- Do NOT pipe git, test, or build commands directly
-
-**Response brevity:**
+Keep agent replies concise:
 
 - Do not narrate tool choice, MCP usage, or step-by-step thinking.
 - Progress updates should be one short sentence only when useful.

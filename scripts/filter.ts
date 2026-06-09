@@ -667,6 +667,27 @@ function main(): void {
 
   // Stats command
   if (rawArgs[0] === "stats") { showStats(); process.exit(0) }
+  
+  // Reset stats command
+  if (rawArgs[0] === "reset-stats") {
+    try {
+      if (fs.existsSync(STATS_PATH)) {
+        fs.unlinkSync(STATS_PATH)
+        process.stdout.write("✓ Stats reset successfully\n")
+      } else {
+        process.stdout.write("✓ No stats file found (already clean)\n")
+      }
+      // Also clean up legacy stats if exists
+      if (fs.existsSync(LEGACY_STATS_PATH)) {
+        fs.unlinkSync(LEGACY_STATS_PATH)
+        process.stdout.write("✓ Legacy stats also cleaned\n")
+      }
+    } catch (e) {
+      process.stderr.write(`✗ Failed to reset stats: ${e}\n`)
+      process.exit(1)
+    }
+    process.exit(0)
+  }
 
   // Strip "--" separator
   const args = rawArgs[0] === "--" ? rawArgs.slice(1) : rawArgs
@@ -683,7 +704,7 @@ function main(): void {
   // Spawn
   const result = spawnSync(command, cmdArgs, {
     stdio: ["inherit", "pipe", "pipe"],
-    shell: false,
+    shell: process.platform === "win32",
     encoding: "utf-8",
     maxBuffer: 50 * 1024 * 1024,
   })

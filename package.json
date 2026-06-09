@@ -9,11 +9,6 @@
     ".": "./dist/src/plugin.js",
     "./mcp-server": "./dist/src/mcp-server.js"
   },
-  "bin": {
-    "token-optimizer": "dist/scripts/setup.js",
-    "to-filter": "dist/scripts/filter.js",
-    "to-install": "dist/scripts/install-codex.js"
-  },
   "repository": {
     "type": "git",
     "url": "https://github.com/edisonaugusthy/token-optimizer.git"
