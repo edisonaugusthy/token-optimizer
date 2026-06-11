@@ -25,51 +25,83 @@ Typical savings:
 | Long file or web reads                    |      8,000 tokens | 2,000-4,000 tokens |         50-75% |
 | Basic coding task with several tool calls |     12,000 tokens | 4,000-6,000 tokens |         50-65% |
 
-## Install
+## Quick Start
 
-**Recommended — global install (stable path across npx cache evictions):**
-
-```bash
-npm install -g token-optimizer
-token-optimizer install
-```
-
-**Or via npx (no prior install needed):**
-
-```bash
-npx token-optimizer install
-```
-
-**Or via curl (macOS / Linux):**
+**One-line install (macOS / Linux / WSL):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main/install.sh | bash
 ```
 
-All options detect installed agents and patch their configs automatically.
-
-Supported agents and platforms:
-
-| Agent                  | macOS / Linux                         | Windows                                     |
-| ---------------------- | ------------------------------------- | ------------------------------------------- |
-| OpenCode               | MCP server + `plugin` array entry     | MCP server + `plugin` array entry           |
-| Cursor                 | MCP server (`~/.cursor/mcp.json`)     | MCP server (`%APPDATA%\Cursor\mcp.json`)    |
-| Claude Desktop         | MCP server (Application Support)      | MCP server (`%APPDATA%\Claude\...`)         |
-| Windsurf               | MCP server (`~/.codeium/windsurf/...`)| MCP server (`%APPDATA%\Codeium\windsurf\...`)|
-| Codex                  | `AGENTS.md` shell-filter instructions | `AGENTS.md` shell-filter instructions       |
-
-> **Why global install?** When run via `npx`, the resolved package path points to
-> the volatile npx cache (`~/.npm/_npx/...` on macOS/Linux, `%LOCALAPPDATA%\npm-cache\npx\...`
-> on Windows). A global install (`npm install -g`) writes a stable path that survives
-> cache evictions and npm upgrades.
-
-## Commands
+**Reset stats:**
 
 ```bash
-npx token-optimizer status     # Install status and token totals
-npx token-optimizer stats      # Token savings summary
-npx token-optimizer update     # Pull latest version and reinstall
-npx token-optimizer uninstall  # Remove injected configs
+curl -fsSL https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main/install.sh | bash -s -- --reset-stats
+```
+
+**Windows (PowerShell):**
+
+```powershell
+# One-line install (PowerShell 7+)
+irm https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main/install.ps1 | iex
+
+# Or download and run manually
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+The installer automatically detects installed AI agents (OpenCode, Cursor, Windsurf, Claude Desktop) and configures them for token optimization.
+
+| Agent          | macOS / Linux                         | Windows                                     |
+| -------------- | ------------------------------------- | ------------------------------------------- |
+| OpenCode       | MCP server + `plugin` array entry     | MCP server + `plugin` array entry           |
+| Cursor         | MCP server (`~/.cursor/mcp.json`)     | MCP server (`%APPDATA%\Cursor\mcp.json`)    |
+| Claude Desktop | MCP server (Application Support)      | MCP server (`%APPDATA%\Claude\...`)         |
+| Windsurf       | MCP server (`~/.codeium/windsurf/...`)| MCP server (`%APPDATA%\Codeium\windsurf\...`)|
+| Codex          | `AGENTS.md` shell-filter instructions | `AGENTS.md` shell-filter instructions       |
+
+### AGENTS.md Configuration
+
+The installer automatically creates or updates `AGENTS.md` for detected agents:
+
+| Agent          | AGENTS.md Location (macOS/Linux)                 | AGENTS.md Location (Windows)                          |
+| -------------- | ------------------------------------------------ | ----------------------------------------------------- |
+| OpenCode       | `~/.config/opencode/AGENTS.md`                   | `%APPDATA%\opencode\AGENTS.md`                        |
+| Cursor         | `~/.cursor/AGENTS.md`                            | `%APPDATA%\Cursor\AGENTS.md`                          |
+| Windsurf       | `~/.windsurf/AGENTS.md`                          | `%APPDATA%\Codeium\windsurf\AGENTS.md`                |
+| Claude Desktop | `~/Library/Application Support/Claude/AGENTS.md` | `%APPDATA%\Claude\AGENTS.md`                          |
+
+If `AGENTS.md` doesn't exist, the installer creates it with token-optimizer configuration. If it exists, the installer adds/updates the token-optimizer section (marked with `<!-- token-optimizer start/end -->` comments).
+
+## Usage
+
+After installation, use the filter for shell commands:
+
+```bash
+# Git operations
+node ~/.config/token-optimizer/filter.js git status
+node ~/.config/token-optimizer/filter.js git diff
+
+# Tests
+node ~/.config/token-optimizer/filter.js npm test
+node ~/.config/token-optimizer/filter.js pytest
+
+# Search/listing
+node ~/.config/token-optimizer/filter.js ls -la
+node ~/.config/token-optimizer/filter.js find . -name "*.ts"
+```
+
+**Stats:**
+
+```bash
+node ~/.config/token-optimizer/filter.js stats        # View savings
+node ~/.config/token-optimizer/filter.js reset-stats  # Clear stats
+```
+
+**Uninstall:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/edisonaugusthy/token-optimizer/main/install.sh | bash -s -- --uninstall
 ```
 
 ## Development
@@ -79,7 +111,7 @@ git clone https://github.com/edisonaugusthy/token-optimizer
 cd token-optimizer
 npm install
 npm run build
-node dist/scripts/setup.js install
+bash install.sh
 ```
 
 Useful scripts:

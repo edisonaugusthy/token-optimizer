@@ -184,10 +184,17 @@ function updateSessionMemory(directory: string, output: string): boolean {
   )
   if (lines.length === 0) return false
   const body = capText(lines.slice(-60).join("\n"), 3000, "session memory")
+  const content = `# Token Optimizer Session Memory\n\n${body}\n`
   try {
     const file = sessionMemoryPath(directory)
+    if (fs.existsSync(file)) {
+      const existing = fs.readFileSync(file, "utf8")
+      if (existing === content) {
+        return false // Return false to indicate no file write was needed
+      }
+    }
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, `# Token Optimizer Session Memory\n\n${body}\n`)
+    fs.writeFileSync(file, content)
     return true
   } catch {
     return false
@@ -396,6 +403,23 @@ export const server: Plugin = async ({ directory, client }) => {
     }
   }
 
+  async function showToast(tool: string, originalTokens: number, filteredTokens: number, savedPct: number) {
+    if (savedPct < 5) return
+    try {
+      const saved = originalTokens - filteredTokens
+      await client.tui.showToast({
+        body: {
+          title: "token-optimizer",
+          message: `${tool}: ${savedPct}% saved (${saved} tokens) — ${originalTokens} → ${filteredTokens}`,
+          variant: savedPct >= 50 ? "success" : "info",
+          duration: 2500,
+        },
+      })
+    } catch {
+      // Ignore toast errors — never interrupt the main flow
+    }
+  }
+
   return {
     // ── 1. Tool schema compression ──────────────────────────────────────────
     "tool.definition": async (
@@ -494,12 +518,14 @@ export const server: Plugin = async ({ directory, client }) => {
           output.output = result.output
           recordSavings(stats, "bash", originalOutput, result.output)
           stats.commandsFiltered++
+          const filteredTokens = estimateTokens(result.output)
 
           await log("debug", `bash filter: ${result.savedPct}% saved`, {
             command: command.slice(0, 60),
             originalTokens,
-            filteredTokens: estimateTokens(result.output),
+            filteredTokens,
           })
+          await showToast("bash", originalTokens, filteredTokens, result.savedPct)
         }
         return
       }
@@ -512,6 +538,7 @@ export const server: Plugin = async ({ directory, client }) => {
           output.output = result.output
           recordSavings(stats, "read", originalOutput, result.output)
           stats.readsCompacted++
+          await showToast("read", originalTokens, estimateTokens(result.output), result.savedPct)
         }
         return
       }
@@ -522,6 +549,11 @@ export const server: Plugin = async ({ directory, client }) => {
         if (compact !== originalOutput) {
           output.output = compact
           recordSavings(stats, "edit", originalOutput, compact)
+          const filteredTokens = estimateTokens(compact)
+          const savedPct = Math.round(((originalTokens - filteredTokens) / originalTokens) * 100)
+          if (savedPct >= 5) {
+            await showToast(input.tool, originalTokens, filteredTokens, savedPct)
+          }
         }
         return
       }
@@ -539,11 +571,13 @@ export const server: Plugin = async ({ directory, client }) => {
           output.output = compressed
           recordSavings(stats, "webfetch", originalOutput, compressed)
           stats.webfetchesCompressed++
+          const filteredTokens = estimateTokens(compressed)
 
           await log("debug", `webfetch filter: ${savedPct}% saved`, {
             originalTokens,
-            filteredTokens: estimateTokens(compressed),
+            filteredTokens,
           })
+          await showToast("webfetch", originalTokens, filteredTokens, savedPct)
         }
         return
       }
@@ -563,11 +597,13 @@ export const server: Plugin = async ({ directory, client }) => {
           output.output = compressed
           recordSavings(stats, "task", originalOutput, compressed)
           stats.tasksCompressed++
+          const filteredTokens = estimateTokens(compressed)
 
           await log("debug", `task filter: ${savedPct}% saved`, {
             originalTokens,
-            filteredTokens: estimateTokens(compressed),
+            filteredTokens,
           })
+          await showToast("task", originalTokens, filteredTokens, savedPct)
         }
         return
       }
@@ -583,10 +619,12 @@ export const server: Plugin = async ({ directory, client }) => {
         if (savedPct >= 10) {
           output.output = compressed
           recordSavings(stats, "glob", originalOutput, compressed)
+          const filteredTokens = estimateTokens(compressed)
           await log("debug", `glob filter: ${savedPct}% saved`, {
             originalTokens,
-            filteredTokens: estimateTokens(compressed),
+            filteredTokens,
           })
+          await showToast("glob", originalTokens, filteredTokens, savedPct)
         }
         return
       }
@@ -602,10 +640,12 @@ export const server: Plugin = async ({ directory, client }) => {
         if (savedPct >= 10) {
           output.output = compressed
           recordSavings(stats, "grep", originalOutput, compressed)
+          const filteredTokens = estimateTokens(compressed)
           await log("debug", `grep filter: ${savedPct}% saved`, {
             originalTokens,
-            filteredTokens: estimateTokens(compressed),
+            filteredTokens,
           })
+          await showToast("grep", originalTokens, filteredTokens, savedPct)
         }
         return
       }
@@ -623,11 +663,13 @@ export const server: Plugin = async ({ directory, client }) => {
           output.output = compressed
           recordSavings(stats, "browser", originalOutput, compressed)
           stats.browserOutputsCompressed++
+          const filteredTokens = estimateTokens(compressed)
           await log("debug", `browser/computer-use filter: ${savedPct}% saved`, {
             tool: input.tool,
             originalTokens,
-            filteredTokens: estimateTokens(compressed),
+            filteredTokens,
           })
+          await showToast(input.tool, originalTokens, filteredTokens, savedPct)
         }
         return
       }
@@ -642,11 +684,13 @@ export const server: Plugin = async ({ directory, client }) => {
           output.output = compressed
           recordSavings(stats, "mcp", originalOutput, compressed)
           stats.mcpOutputsCompressed++
-          await log("debug", `mcp filter: ${savedPct}% saved`, {
+          const filteredTokens = estimateTokens(compressed)
+          await log("debug", `MCP filter: ${savedPct}% saved`, {
             tool: input.tool,
             originalTokens,
-            filteredTokens: estimateTokens(compressed),
+            filteredTokens,
           })
+          await showToast(input.tool, originalTokens, filteredTokens, savedPct)
         }
         return
       }
@@ -669,11 +713,14 @@ export const server: Plugin = async ({ directory, client }) => {
         const dropped = originalOutput.length - cutAt
         output.output = `${truncated}\n[... ${dropped} chars (≈${Math.ceil(dropped / 4)} tokens) truncated — use a narrower query or read specific sections]`
         recordSavings(stats, "generic", originalOutput, output.output)
+        const filteredTokens = estimateTokens(output.output)
+        const savedPct = Math.round(((originalTokens - filteredTokens) / originalTokens) * 100)
         await log("debug", `generic cap: ${input.tool} truncated`, {
           originalChars: originalOutput.length,
           cappedChars: cutAt,
           tool: input.tool,
         })
+        await showToast(input.tool, originalTokens, filteredTokens, savedPct)
       }
     },
 
