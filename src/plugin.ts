@@ -1,7 +1,7 @@
 /**
  * token-optimizer — OpenCode Plugin
  *
- * Reduces token usage by 60-75% by stacking four techniques:
+ * Reduces token waste by stacking conservative filtering techniques:
  *
  *   1. Tool schema compression    (tool.definition hook)
  *      → Slims built-in tool descriptions sent on every API call.
@@ -20,7 +20,7 @@
  *
  *   4. Intelligent token-budget history trimming  (messages.transform hook)
  *      → Tracks total tool-result tokens in context window.
- *      → When over CONTEXT_TOOL_BUDGET (12 000 tokens), replaces lowest-priority
+ *      → When over CONTEXT_TOOL_BUDGET (6 000 tokens), replaces lowest-priority
  *        old results with one-line stubs, scoring by tool type × recency.
  *      → Never trims the last PROTECTED_TURNS (3) turns.
  *
@@ -33,12 +33,10 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
-import * as fs from "node:fs"
-import * as path from "node:path"
 import { filterBashOutput } from "./filters/bash.js"
 import { filterReadOutput, filterEditOutput } from "./filters/read.js"
 import { filterGitIgnoredPaths } from "./gitignore.js"
-import { applySlimDescription, expandLineRange, type EditArgs } from "./schema-slim.js"
+import { applySlimDescription, cleanSchemaDescriptions, expandLineRange, type EditArgs } from "./schema-slim.js"
 
 // ─── Token tracking (session-level stats) ────────────────────────────────────
 
@@ -54,8 +52,6 @@ interface SessionStats {
   mcpOutputsCompressed: number
   browserOutputsCompressed: number
   historyTrimmed: number
-  sessionMemoryInjected: number
-  sessionMemoryWritten: number
   bySurface: Record<string, { originalTokens: number; filteredTokens: number; count: number }>
 }
 
@@ -72,8 +68,6 @@ function createStats(): SessionStats {
     mcpOutputsCompressed: 0,
     browserOutputsCompressed: 0,
     historyTrimmed: 0,
-    sessionMemoryInjected: 0,
-    sessionMemoryWritten: 0,
     bySurface: {},
   }
 }
@@ -97,37 +91,47 @@ function wantsFullDetail(args: Record<string, unknown> | undefined, raw: string)
   return /\b(full|raw|verbose|unfiltered|no[-_ ]?filter|include[-_ ]?(logs|console|network|dom|trace|screenshots?)|debug[-_ ]?detail)\b/.test(haystack)
 }
 
-function capText(text: string, maxChars: number, label: string): string {
-  if (text.length <= maxChars) return text
-  const slice = text.slice(0, maxChars)
-  const lastNewline = slice.lastIndexOf("\n")
-  const cutAt = lastNewline > maxChars * 0.85 ? lastNewline : maxChars
-  const dropped = text.length - cutAt
-  return `${text.slice(0, cutAt).trimEnd()}\n[... ${dropped} chars (≈${Math.ceil(dropped / 4)} tokens) omitted from ${label}; request full/raw/verbose detail to bypass]`
+function applyIfSmaller(original: string, filtered: string): string {
+  return estimateTokens(filtered) < estimateTokens(original) ? filtered : original
 }
 
-function compactTaskPrompt(raw: string): string {
+function dedupeExactLines(lines: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const line of lines) {
+    const key = line.trim()
+    if (key && seen.has(key)) continue
+    if (key) seen.add(key)
+    out.push(line)
+  }
+  return out
+}
+
+function dedupeParagraphs(text: string): string {
+  const seen = new Set<string>()
+  return text
+    .split(/\n{2,}/)
+    .filter(block => {
+      const key = block.replace(/\s+/g, " ").trim()
+      if (!key) return true
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .join("\n\n")
+}
+
+export function compactTaskPrompt(raw: string): string {
   let text = raw.replace(/\n{3,}/g, "\n\n").trim()
   text = text.replace(/# AGENTS\.md instructions[\s\S]*?(?=\n---|\n# |\n[A-Z][^\n]{0,80}:|$)/gi, "[repo agent instructions already available]\n")
   for (const marker of ["token-optimizer", "opencode-" + "token-" + "saver"]) {
     text = text.replace(new RegExp(`<!-- ${marker} start -->[\\s\\S]*?<!-- ${marker} end -->`, "gi"), "[token-optimizer shell rule omitted]\n")
   }
   text = text.replace(/<INSTRUCTIONS>[\s\S]{800,}?<\/INSTRUCTIONS>/gi, "[long inherited instructions omitted]\n")
-
-  if (text.length <= 3500) return text
-
-  const lines = text.split("\n")
-  const keep = lines.filter(line => {
-    const t = line.trim()
-    return /^(task|goal|objective|files?|constraints?|success|verify|tests?|do not|must|please|implement|fix|review)\b/i.test(t)
-      || /(`[^`]+`|\/[\w./-]+|[A-Za-z]:\\)/.test(t)
-      || /\b(error|failed|exception|regression|todo|requirement)\b/i.test(t)
-  })
-  const compact = keep.length >= 6 ? keep.join("\n") : text
-  return capText(compact, 3500, "task prompt")
+  return applyIfSmaller(raw, text)
 }
 
-function compactBrowserOutput(raw: string): string {
+export function compactBrowserOutput(raw: string): string {
   const lines = raw.split("\n")
   const important = lines.filter(line => {
     const t = line.trim()
@@ -140,65 +144,32 @@ function compactBrowserOutput(raw: string): string {
   const consoleCount = lines.filter(l => /\bconsole\b/i.test(l)).length
   const networkCount = lines.filter(l => /\b(request|response|network|status)\b/i.test(l)).length
   const header = `[browser/computer-use compacted: ${lines.length} lines, console=${consoleCount}, network=${networkCount}]`
-  return `${header}\n${capText(source.replace(/\n{3,}/g, "\n\n").trim(), 4500, "browser output")}`
+  const compacted = `${header}\n${dedupeExactLines(source.split("\n")).join("\n").replace(/\n{3,}/g, "\n\n").trim()}`
+  return applyIfSmaller(raw, compacted)
 }
 
-function compactMcpOutput(tool: string, raw: string): string {
+export function compactMcpOutput(tool: string, raw: string): string {
   let text = raw
   text = text.replace(/"fp":"[^"]*",?/g, "")
   text = text.replace(/"sp":"[^"]*",?/g, "")
   text = text.replace(/"bt":"[^"]{200,}",?/g, "")
-  text = text.replace(/"source":"([^"\\]|\\.){1200,}",?/g, "\"source\":\"[large source omitted; use get_code_snippet/read for exact lines]\",")
   text = text.replace(/"embedding":\[[^\]]+\],?/g, "")
+  text = text.replace(/"rank":-?\d+(?:\.\d+)?,?/g, "")
+  text = text.replace(/"score":-?\d+(?:\.\d+)?,?/g, "")
+  text = text.replace(/"complexity":\d+,?/g, "")
+  text = text.replace(/"source":"([^"\\]|\\.){1200,}",?/g, "\"source\":\"[large source omitted; use get_code_snippet/read for exact lines]\",")
   text = text.replace(/\n{3,}/g, "\n\n")
 
   if (/search_graph|query_graph|trace_path|get_code_snippet|get_architecture|codebase|mcp/i.test(tool)) {
-    return capText(text, 6000, `${tool} MCP output`)
+    return applyIfSmaller(raw, text)
   }
   if (/jira|notion|drive|figma|confluence|sheets|slides/i.test(tool)) {
     const lines = text.split("\n").filter(line =>
       /\b(id|key|title|name|url|status|owner|assignee|date|updated|summary|file|path|line|component|node|style|token)\b/i.test(line)
     )
-    return capText((lines.length >= 4 ? lines.join("\n") : text).trim(), 5000, `${tool} MCP output`)
+    return applyIfSmaller(raw, (lines.length >= 4 ? lines.join("\n") : text).trim())
   }
-  return capText(text, 4000, `${tool} output`)
-}
-
-function sessionMemoryPath(directory: string): string {
-  return path.join(directory, ".token-optimizer", "session-memory.md")
-}
-
-function readSessionMemory(directory: string): string {
-  try {
-    const file = sessionMemoryPath(directory)
-    if (!fs.existsSync(file)) return ""
-    return capText(fs.readFileSync(file, "utf8").trim(), 2500, "session memory")
-  } catch {
-    return ""
-  }
-}
-
-function updateSessionMemory(directory: string, output: string): boolean {
-  const lines = output.split("\n").filter(line =>
-    /\b(changed|modified|created|deleted|implemented|verified|failed|todo|next|decision|constraint|file|test|build|error)\b/i.test(line)
-  )
-  if (lines.length === 0) return false
-  const body = capText(lines.slice(-60).join("\n"), 3000, "session memory")
-  const content = `# Token Optimizer Session Memory\n\n${body}\n`
-  try {
-    const file = sessionMemoryPath(directory)
-    if (fs.existsSync(file)) {
-      const existing = fs.readFileSync(file, "utf8")
-      if (existing === content) {
-        return false // Return false to indicate no file write was needed
-      }
-    }
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, content)
-    return true
-  } catch {
-    return false
-  }
+  return applyIfSmaller(raw, text)
 }
 
 // ─── Task output compression ──────────────────────────────────────────────────
@@ -210,19 +181,15 @@ function updateSessionMemory(directory: string, output: string): boolean {
  * Webfetch is the #1 source of token bloat in research sub-agents —
  * each URL fetch returns full page content that accumulates across turns.
  */
-const WEBFETCH_MAX_CHARS = 3500
 
 /** Noise patterns that appear in site chrome, navbars, footers, cookie banners */
 const WEBFETCH_NOISE_RE = /^(Skip to|Navigation|Cookie|Accept all|Privacy Policy|Terms of|Sign in|Sign up|Log in|Subscribe|Newsletter|Advertisement|©\s*\d{4}|\[!\[|Back to top)/i
 
 /**
- * Compress webfetch output:
- *   1. Strip lines that are site navigation/footer/cookie-banner boilerplate
- *   2. Strip excessive link-only lines (markdown `[text](url)` with no prose context)
- *   3. Collapse 3+ blank lines → 1
- *   4. Hard-truncate to WEBFETCH_MAX_CHARS with a summary note
+ * Compress webfetch output by removing navigation/footer boilerplate and
+ * collapsing excessive whitespace without hard-truncating current results.
  */
-function compressWebfetch(raw: string): string {
+export function compressWebfetch(raw: string): string {
   const lines = raw.split("\n")
 
   const filtered = lines.filter(line => {
@@ -239,28 +206,17 @@ function compressWebfetch(raw: string): string {
 
   let text = filtered.join("\n")
   // Collapse 3+ blank lines → 1
-  text = text.replace(/\n{3,}/g, "\n\n").trim()
-
-  if (text.length <= WEBFETCH_MAX_CHARS) return text
-
-  const omitted = text.length - WEBFETCH_MAX_CHARS
-  const truncated = text.slice(0, WEBFETCH_MAX_CHARS).trimEnd()
-  const lastNewline = truncated.lastIndexOf("\n")
-  const clean = lastNewline > WEBFETCH_MAX_CHARS * 0.85 ? truncated.slice(0, lastNewline) : truncated
-  return `${clean}\n\n... [webfetch truncated — ${omitted} chars (≈${Math.ceil(omitted / 4)} tokens) omitted]`
+  text = dedupeParagraphs(text.replace(/\n{3,}/g, "\n\n").trim())
+  return applyIfSmaller(raw, text)
 }
 
 /** Max chars allowed in a compressed task result (≈625 tokens at 4 chars/token). */
-const TASK_MAX_CHARS = 2500
 
 /**
- * Compress a sub-agent task result:
- *   1. Strip outer <task …> / </task> and <task_result> / </task_result> XML tags
- *   2. Strip leading [System: …] sanitiser lines
- *   3. Collapse 3+ blank lines → 1 blank line
- *   4. Hard-truncate to TASK_MAX_CHARS, appending a summary line
+ * Compress a sub-agent task result by removing wrappers, sanitizer noise, and
+ * excessive whitespace without hard-truncating current results.
  */
-function compressTaskOutput(raw: string): string {
+export function compressTaskOutput(raw: string): string {
   let text = raw
 
   // Strip outer <task id="..." state="...">…</task> wrapper
@@ -274,16 +230,7 @@ function compressTaskOutput(raw: string): string {
 
   // Collapse excessive blank lines
   text = text.replace(/\n{3,}/g, "\n\n").trim()
-
-  if (text.length <= TASK_MAX_CHARS) return text
-
-  // Hard truncate with summary
-  const omitted = text.length - TASK_MAX_CHARS
-  const truncated = text.slice(0, TASK_MAX_CHARS).trimEnd()
-  // Try to end on a whole line
-  const lastNewline = truncated.lastIndexOf("\n")
-  const clean = lastNewline > TASK_MAX_CHARS * 0.8 ? truncated.slice(0, lastNewline) : truncated
-  return `${clean}\n\n... [task result truncated — ${omitted} chars (≈${Math.ceil(omitted / 4)} tokens) omitted]`
+  return applyIfSmaller(raw, text)
 }
 
 // ─── Glob output compression ─────────────────────────────────────────────────
@@ -293,7 +240,6 @@ function compressTaskOutput(raw: string): string {
  * - If ≤40 paths, return as-is.
  * - Otherwise group by top-level directory and collapse each dir into a
  *   one-line summary: "src/filters/ (12 files: *.ts ×8, *.js ×4)"
- * - Hard cap at 3000 chars.
  */
 function compressGlobOutput(raw: string, workingDirectory: string): string {
   const rawLines = raw.split("\n").map(l => l.trim()).filter(Boolean)
@@ -328,9 +274,7 @@ function compressGlobOutput(raw: string, workingDirectory: string): string {
     summaryLines.push(`  ${dir}/ (${files.length} files: ${extSummary})`)
   }
 
-  let result = summaryLines.join("\n")
-  if (result.length > 3000) result = result.slice(0, 3000) + "\n[glob list truncated]"
-  return result
+  return summaryLines.join("\n")
 }
 
 // ─── Grep output compression ──────────────────────────────────────────────────
@@ -339,7 +283,6 @@ function compressGlobOutput(raw: string, workingDirectory: string): string {
  * Compress grep output.
  * - Strip ANSI escape codes.
  * - Per file: keep first 3 matches + last 1, collapse the rest to a count.
- * - Hard cap at 3000 chars total.
  */
 function compressGrepOutput(raw: string, workingDirectory: string): string {
   // Strip ANSI codes
@@ -375,7 +318,6 @@ function compressGrepOutput(raw: string, workingDirectory: string): string {
 
   let result = out.join("\n")
   if (!result) return "[all grep matches are ignored by git]\n"
-  if (result.length > 3000) result = result.slice(0, 3000) + "\n[grep output truncated]"
   return result
 }
 
@@ -424,7 +366,7 @@ export const server: Plugin = async ({ directory, client }) => {
     // ── 1. Tool schema compression ──────────────────────────────────────────
     "tool.definition": async (
       input: { toolID: string },
-      output: { description: string; parameters?: { properties?: Record<string, { description?: string }> } }
+      output: { description: string; parameters?: Record<string, unknown> & { properties?: Record<string, { description?: string }> } }
     ) => {
       // 1a. Slim tool-level description
       const slim = applySlimDescription(input.toolID, output.description)
@@ -452,6 +394,10 @@ export const server: Plugin = async ({ directory, client }) => {
             }
           }
         }
+      }
+
+      if (output.parameters) {
+        cleanSchemaDescriptions(output.parameters)
       }
     },
 
@@ -585,8 +531,8 @@ export const server: Plugin = async ({ directory, client }) => {
       // ── 3e. Sub-agent task result compression ─────────────────────────────
       // Task results are returned inside <task_result>…</task_result> XML.
       // They can be thousands of tokens and are fed back verbatim into the
-      // parent agent context. We strip the XML wrapper and hard-truncate to
-      // ~4000 chars (≈1000 tokens) to cap context growth.
+      // parent agent context. We strip wrappers/noise and only apply the
+      // result when it actually reduces token usage.
       if (input.tool === "task") {
         const compressed = compressTaskOutput(originalOutput)
         const savedPct = originalTokens === 0
@@ -631,7 +577,7 @@ export const server: Plugin = async ({ directory, client }) => {
 
       // ── 3g. Grep output compaction ────────────────────────────────────────
       // grep returns file:line:content triples. We deduplicate same-file
-      // matches (keeping first and last) and cap total output at 3000 chars.
+      // matches while preserving the full grouped result.
       if (input.tool === "grep") {
         const compressed = compressGrepOutput(originalOutput, directory)
         const savedPct = originalTokens === 0
@@ -695,53 +641,9 @@ export const server: Plugin = async ({ directory, client }) => {
         return
       }
 
-      // ── 3j. Generic fallback cap ──────────────────────────────────────────
-      // Any tool not explicitly handled above (MCP tools, search_graph,
-      // query_graph, trace_path, get_code_snippet, etc.) gets a hard cap.
-      // This prevents any single tool call from flooding the context window
-      // with thousands of tokens of uncompressed output.
-      //
-      // Cap is 4000 chars (≈1000 tokens). We try to snap to a whole-line
-      // boundary so we don't cut mid-JSON or mid-sentence.
-      const GENERIC_CAP_CHARS = 4000
-      if (originalOutput.length > GENERIC_CAP_CHARS) {
-        const slice = originalOutput.slice(0, GENERIC_CAP_CHARS)
-        const lastNewline = slice.lastIndexOf("\n")
-        // Only snap to newline if it's within the last 15% of the cap
-        const cutAt = lastNewline > GENERIC_CAP_CHARS * 0.85 ? lastNewline : GENERIC_CAP_CHARS
-        const truncated = originalOutput.slice(0, cutAt).trimEnd()
-        const dropped = originalOutput.length - cutAt
-        output.output = `${truncated}\n[... ${dropped} chars (≈${Math.ceil(dropped / 4)} tokens) truncated — use a narrower query or read specific sections]`
-        recordSavings(stats, "generic", originalOutput, output.output)
-        const filteredTokens = estimateTokens(output.output)
-        const savedPct = Math.round(((originalTokens - filteredTokens) / originalTokens) * 100)
-        await log("debug", `generic cap: ${input.tool} truncated`, {
-          originalChars: originalOutput.length,
-          cappedChars: cutAt,
-          tool: input.tool,
-        })
-        await showToast(input.tool, originalTokens, filteredTokens, savedPct)
-      }
     },
 
-    // ── 4. Cap output tokens for sub-agent calls ─────────────────────────────
-    // Sub-agents (explore/general) rarely need more than 2048 output tokens.
-    // Reducing maxOutputTokens cuts billing cost on output-heavy providers.
-    "chat.params": async (
-      input: { agent?: string },
-      output: { maxOutputTokens?: number }
-    ) => {
-      const agent = input.agent ?? ""
-      // Only cap non-primary agents (subagents, explore, general, etc.)
-      if (agent && agent !== "primary" && !agent.includes("claude") && !agent.includes("main")) {
-        const current = output.maxOutputTokens
-        if (!current || current > 2048) {
-          output.maxOutputTokens = 2048
-        }
-      }
-    },
-
-    // ── 5. Intelligent token-budget history trimming ─────────────────────────
+    // ── 4. Intelligent token-budget history trimming ─────────────────────────
     //
     // Problem: every API call re-sends ALL previous tool results verbatim.
     // A 20-turn session can accumulate 40 000+ tokens of tool history alone.
@@ -782,7 +684,7 @@ export const server: Plugin = async ({ directory, client }) => {
       /** Total token budget for tool results in context. Above this → trim. */
       const CONTEXT_TOOL_BUDGET = 6_000
       /** Always keep the last N turns completely untouched. */
-      const PROTECTED_TURNS = 2
+      const PROTECTED_TURNS = 3
       /** Minimum chars for a result to be considered trim-eligible. */
       const MIN_TRIM_CHARS = 80
 
@@ -821,11 +723,31 @@ export const server: Plugin = async ({ directory, client }) => {
         return `[${toolName}${hint}: ${origLen} chars, trimmed from history]`
       }
 
-      const msgs = output.messages
-      const totalMsgs = msgs.length
-      const protectedStart = Math.max(0, totalMsgs - PROTECTED_TURNS)
+    const msgs = output.messages
+    const totalMsgs = msgs.length
+    const protectedStart = Math.max(0, totalMsgs - PROTECTED_TURNS)
 
-      // ── Step 1: Count current tool-result tokens in context ───────────────
+    const seenOutputs = new Set<string>()
+    for (let i = totalMsgs - 1; i >= 0; i--) {
+      for (const part of msgs[i].parts) {
+        if (part.type !== "tool" || part.state?.status !== "completed" || !part.state.output) continue
+        const key = part.state.output
+        if (seenOutputs.has(key) && i < protectedStart && key.length > MIN_TRIM_CHARS) {
+          const toolName = part.tool ?? "tool"
+          part.state.output = makeStub(toolName, part.args ?? {}, key.length).replace("trimmed from history", "duplicate trimmed from history")
+          stats.historyTrimmed++
+          continue
+        }
+        seenOutputs.add(key)
+      }
+    }
+
+    // ── Periodic cleanup: reset trimming stats every 200 turns ──
+    if (totalMsgs > 0 && totalMsgs % 200 === 0) {
+      stats.historyTrimmed = 0
+    }
+
+    // ── Step 1: Count current tool-result tokens in context ───────────────
       type Candidate = {
         part: { type: string; tool?: string; args?: Record<string, unknown>; state?: { status?: string; output?: string } }
         msgIndex: number
@@ -894,18 +816,10 @@ export const server: Plugin = async ({ directory, client }) => {
         })
       }
 
-      const recentMemorySource = msgs
-        .slice(Math.max(0, totalMsgs - 8))
-        .flatMap(msg => msg.parts)
-        .map(part => part.state?.output ?? "")
-        .filter(Boolean)
-        .join("\n")
-      if (recentMemorySource && updateSessionMemory(directory, recentMemorySource)) {
-        stats.sessionMemoryWritten++
-      }
+      // History trimming bounds context without adding prompt text later.
     },
 
-    // ── 6. Trim system prompt boilerplate ────────────────────────────────────
+    // ── 5. Trim system prompt boilerplate ────────────────────────────────────
     // OpenCode's built-in system prompt contains long multi-paragraph sections.
     // Remove known verbose patterns that don't affect task performance.
     "experimental.chat.system.transform": async (
@@ -916,9 +830,19 @@ export const server: Plugin = async ({ directory, client }) => {
         // Strip long XML example blocks from system sections (they recur every call)
         let s = section
         s = s.replace(/<example>[\s\S]{300,}?<\/example>/g, "<example>[omitted]</example>")
+        s = s.replace(/<!-- token-optimizer start -->[\s\S]*?<!-- token-optimizer end -->/gi, "[token-optimizer shell rule omitted]")
+        s = s.replace(/<!-- opencode-token-saver start -->[\s\S]*?<!-- opencode-token-saver end -->/gi, "[token-optimizer shell rule omitted]")
         // Collapse runs of 3+ blank lines
         s = s.replace(/\n{3,}/g, "\n\n")
         return s
+      })
+      const seenSections = new Set<string>()
+      output.system = output.system.filter(section => {
+        const key = section.replace(/\s+/g, " ").trim()
+        if (!key) return false
+        if (seenSections.has(key)) return false
+        seenSections.add(key)
+        return true
       })
 
       if (!output.system.some(section => section.includes("Token Optimizer Response Brevity"))) {
@@ -928,20 +852,14 @@ export const server: Plugin = async ({ directory, client }) => {
         ].join("\n"))
       }
 
-      const memory = readSessionMemory(directory)
-      if (memory && !output.system.some(section => section.includes("Token Optimizer Session Memory"))) {
-        output.system.push(`Token Optimizer Session Memory\n${memory}`)
-        stats.sessionMemoryInjected++
-      }
     },
 
-    // ── 7. Session stats logging ─────────────────────────────────────────────
+    // ── 6. Session stats logging ─────────────────────────────────────────────
     event: async ({ event }: { event: { type: string } }) => {
       if (event.type === "session.idle" && (
         stats.commandsFiltered + stats.webfetchesCompressed + stats.tasksCompressed +
         stats.taskPromptsCompressed + stats.mcpOutputsCompressed + stats.browserOutputsCompressed +
-        stats.readsCompacted + stats.editsExpanded + stats.historyTrimmed +
-        stats.sessionMemoryInjected + stats.sessionMemoryWritten
+        stats.readsCompacted + stats.editsExpanded + stats.historyTrimmed
       ) > 0) {
         const totalSaved = stats.originalTokens - stats.filteredTokens
         const pct = stats.originalTokens === 0
@@ -958,8 +876,6 @@ export const server: Plugin = async ({ directory, client }) => {
           mcpOutputsCompressed: stats.mcpOutputsCompressed,
           browserOutputsCompressed: stats.browserOutputsCompressed,
           historyTrimmed: stats.historyTrimmed,
-          sessionMemoryInjected: stats.sessionMemoryInjected,
-          sessionMemoryWritten: stats.sessionMemoryWritten,
           originalTokens: stats.originalTokens,
           filteredTokens: stats.filteredTokens,
           savedTokens: totalSaved,

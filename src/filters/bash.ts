@@ -72,6 +72,11 @@ function deduplicateLines(text: string, maxRepeats = 1): string {
   return result.join("\n").trim()
 }
 
+/** Remove excessive blank lines (3+ consecutive → 1) */
+function deduplicateBlankLines(text: string): string {
+  return text.replace(/\n{3,}/g, "\n\n").trim()
+}
+
 /** Strip ANSI color/control codes */
 function stripAnsi(text: string): string {
   return text.replace(/\x1B\[[0-9;]*[mGKHF]/g, "")
@@ -325,6 +330,11 @@ function filterGitWriteOp(raw: string, cmd: string): FilterResult {
     return savings(raw, parts.join(" ") || "ok")
   }
 
+  if (cmd === "fetch") {
+    const refs = lines(clean).filter(l => l.includes("->") || l.includes("new commit"))
+    return savings(raw, refs.length ? refs.join("\n") : "ok")
+  }
+
   return savings(raw, clean || "ok")
 }
 
@@ -332,66 +342,12 @@ function filterGitWriteOp(raw: string, cmd: string): FilterResult {
 
 function filterLs(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-
-  // Group files by extension for very long listings
-  const ls = lines(clean)
-  if (ls.length <= 20) {
-    // Short enough — strip permissions/dates from -l format
-    const simplified = ls.map(l => {
-      const m = l.match(/(?:[\d-]+\s+\d+\s+\w+\s+\w+\s+[\d.]+[KMG]?\s+\w+\s+\d+\s+[\d:]+\s+)?(.+)$/)
-      return m ? m[1] : l
-    }).filter(Boolean)
-    return savings(raw, simplified.join("\n"))
-  }
-
-  // Long listing: group by extension
-  const byExt: Record<string, number> = {}
-  const dirs: string[] = []
-
-  for (const line of ls) {
-    const name = line.split(/\s+/).pop() || ""
-    if (name.startsWith(".")) continue
-    if (line.startsWith("d") || name.endsWith("/")) {
-      dirs.push(name.replace(/\/$/, ""))
-    } else {
-      const ext = name.includes(".") ? name.split(".").pop()! : "(no ext)"
-      byExt[ext] = (byExt[ext] || 0) + 1
-    }
-  }
-
-  const parts: string[] = []
-  if (dirs.length) parts.push(`dirs: ${dirs.slice(0, 10).join(" ")}${dirs.length > 10 ? ` +${dirs.length - 10}` : ""}`)
-  for (const [ext, count] of Object.entries(byExt).sort((a, b) => b[1] - a[1])) {
-    parts.push(`*.${ext}: ${count}`)
-  }
-
-  return savings(raw, parts.join("\n") || clean)
+  return savings(raw, deduplicateBlankLines(clean))
 }
 
 function filterFind(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const ls = lines(clean).filter(Boolean)
-
-  if (ls.length <= 30) return savings(raw, clean)
-
-  // Group by directory
-  const byDir: Record<string, string[]> = {}
-  for (const f of ls) {
-    const dir = f.includes("/") ? f.split("/").slice(0, -1).join("/") || "." : "."
-    if (!byDir[dir]) byDir[dir] = []
-    byDir[dir].push(f.split("/").pop() || f)
-  }
-
-  const result: string[] = []
-  for (const [dir, files] of Object.entries(byDir)) {
-    if (files.length <= 3) {
-      files.forEach(f => result.push(`${dir}/${f}`))
-    } else {
-      result.push(`${dir}/ (${files.length} files: ${files.slice(0, 3).join(", ")}${files.length > 3 ? ", ..." : ""})`)
-    }
-  }
-
-  return savings(raw, result.join("\n"))
+  return savings(raw, deduplicateBlankLines(clean))
 }
 
 // ─── Search filters ───────────────────────────────────────────────────────────
@@ -424,461 +380,242 @@ function filterRgJson(raw: string): FilterResult {
 
 function filterGrep(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const ls = lines(clean).filter(Boolean)
-
-  if (ls.length <= 20) return savings(raw, clean)
-
-  // Detect rg --json output
-  if (ls[0]?.startsWith('{"type":') || ls[0]?.startsWith('{"data":')) {
-    return filterRgJson(clean)
-  }
-
-  // Group matches by file, show count + first few
-  const byFile: Record<string, string[]> = {}
-  for (const line of ls) {
-    const m = line.match(/^([^:]+):(\d+):(.*)$/) || line.match(/^([^:]+):(.*)$/)
-    if (m) {
-      const file = m[1]
-      if (!byFile[file]) byFile[file] = []
-      byFile[file].push(line.slice(file.length + 1))
-    } else {
-      if (!byFile["<stdin>"]) byFile["<stdin>"] = []
-      byFile["<stdin>"].push(line)
-    }
-  }
-
-  const result: string[] = []
-  let totalMatches = 0
-  for (const [file, matches] of Object.entries(byFile)) {
-    totalMatches += matches.length
-    if (matches.length <= 3) {
-      matches.forEach(m => result.push(`${file}:${m}`))
-    } else {
-      result.push(`${file}: ${matches.length} matches`)
-      // Cap each sample line to 80 chars to avoid long minified-code lines
-      matches.slice(0, 2).forEach(m => result.push(`  ${m.trim().slice(0, 80)}`))
-      result.push(`  ... (${matches.length - 2} more)`)
-    }
-  }
-
-  result.unshift(`${totalMatches} matches in ${Object.keys(byFile).length} files:`)
-  return savings(raw, result.join("\n"))
+  return savings(raw, deduplicateBlankLines(clean))
 }
 
-// ─── Test runner filters ──────────────────────────────────────────────────────
-
-interface TestSummary {
-  passed: number
-  failed: number
-  skipped: number
-  failures: string[]
-}
-
-function parseTestSummary(clean: string): TestSummary {
-  let passed = 0, failed = 0, skipped = 0
-  const failures: string[] = []
-
-  // Jest / Vitest / generic
-  const passMatch = clean.match(/(\d+)\s+passed/)
-  const failMatch = clean.match(/(\d+)\s+failed/)
-  const skipMatch = clean.match(/(\d+)\s+skipped/)
-  if (passMatch) passed = parseInt(passMatch[1])
-  if (failMatch) failed = parseInt(failMatch[1])
-  if (skipMatch) skipped = parseInt(skipMatch[1])
-
-  // Cargo test: "test X ... FAILED"
-  for (const line of lines(clean)) {
-    if (/\bFAILED\b/.test(line) || /^FAIL\b/.test(line)) {
-      const name = line.replace(/^test\s+/, "").replace(/\s+FAILED.*$/, "").trim()
-      if (name && !failures.includes(name)) failures.push(name)
-    }
-    if (/test result:.*ok/.test(line)) {
-      const m = line.match(/(\d+) passed/) ; if (m) passed = parseInt(m[1])
-    }
-    if (/test result:.*FAILED/.test(line)) {
-      const m = line.match(/(\d+) failed/) ; if (m) failed = parseInt(m[1])
-    }
-    // pytest
-    if (/FAILED\s+/.test(line)) {
-      const m = line.match(/FAILED\s+(.+?)(?:\s+-|$)/)
-      if (m && !failures.includes(m[1].trim())) failures.push(m[1].trim())
-    }
-    // Go test
-    if (/^--- FAIL:/.test(line)) {
-      const m = line.match(/--- FAIL:\s+(\S+)/)
-      if (m && !failures.includes(m[1])) failures.push(m[1])
-    }
-  }
-
-  return { passed, failed, skipped, failures }
-}
+// ─── Test runner filters (keep ALL output, strip only progress/spinners) ──────
 
 function filterTestOutput(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const { passed, failed, skipped, failures } = parseTestSummary(clean)
+  if (!clean) return savings(raw, "(no output)")
 
-  if (failed === 0 && passed === 0) {
-    // Can't parse — fall back to truncation
-    return savings(raw, truncate(clean, 40))
-  }
+  // Keep all test output, only strip progress bars/spinners and dedup blank lines
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    // Strip progress bars, spinners, timing noise
+    if (/^\s*(\d+(\.\d+)?s|\d+ms)\s*$/.test(t)) return false
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    if (/^\s*PASS\s+\d+\s+FAIL\s+\d+/.test(t)) return true
+    if (/^\s*\d+\s+passing|\d+\s+failing|\d+\s+pending/.test(t)) return true
+    return true
+  })
 
-  const summary = [
-    `${failed > 0 ? "FAILED" : "PASSED"}: ${passed + failed} tests`,
-    passed  ? `${passed} passed`  : "",
-    failed  ? `${failed} failed`  : "",
-    skipped ? `${skipped} skipped` : "",
-  ].filter(Boolean).join(", ")
-
-  const result: string[] = [summary]
-
-  if (failures.length > 0) {
-    result.push("Failures:")
-    failures.slice(0, 20).forEach(f => result.push(`  - ${f}`))
-    if (failures.length > 20) result.push(`  ... (${failures.length - 20} more)`)
-
-    // Extract failure details (error messages, assertion diffs)
-    const failureDetails = extractFailureDetails(clean)
-    if (failureDetails) result.push(failureDetails)
-  }
-
-  return savings(raw, result.join("\n"))
+  const joined = lines.join("\n")
+  if (!joined.trim()) return savings(raw, "(no test output)")
+  return savings(raw, deduplicateBlankLines(joined))
 }
 
-function extractFailureDetails(clean: string): string {
-  const details: string[] = []
-  let inFailure = false
-
-  for (const line of lines(clean)) {
-    // Start of failure block markers
-    if (/^(?:FAIL|FAILED|Error|AssertionError|panicked at|thread '.*' panicked)/.test(line)) {
-      inFailure = true
-      details.push(line)
-    } else if (inFailure) {
-      // Stop at success/summary lines
-      if (/^(?:PASS|ok\s|test result:|={3,}|-{3,}|\d+ passed)/.test(line)) {
-        inFailure = false
-      } else if (line.trim()) {
-        details.push(`  ${line.trim()}`)
-        if (details.length > 30) { details.push("  ..."); break }
-      }
-    }
-  }
-
-  return details.slice(0, 25).join("\n")
-}
-
-// ─── Linter / build filters ───────────────────────────────────────────────────
+// ─── Linter / build filters (keep ALL output, strip only progress/spinners) ──────
 
 function filterEslint(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
+  if (!clean) return savings(raw, "(no output)")
 
-  // Group errors by rule
-  const byRule: Record<string, number> = {}
-  const byFile: Record<string, string[]> = {}
-  let currentFile = ""
-
-  for (const line of lines(clean)) {
-    // File header line (no leading whitespace, ends in .js/.ts etc.)
-    if (/^[/\w].*\.(js|ts|jsx|tsx|vue|svelte)$/.test(line.trim())) {
-      currentFile = line.trim()
-      if (!byFile[currentFile]) byFile[currentFile] = []
-      continue
-    }
-
-    // Error/warning line: "  42:10  error  no-unused-vars  eslint..."
-    const m = line.match(/\s+(\d+):(\d+)\s+(error|warning)\s+(.+?)\s+([\w/-]+)$/)
-    if (m) {
-      const [, , , severity, message, rule] = m
-      byRule[rule] = (byRule[rule] || 0) + 1
-      if (currentFile) {
-        byFile[currentFile].push(`${m[1]}:${m[2]} ${severity}: ${message}`)
-      }
-    }
-  }
-
-  const result: string[] = []
-  const totalErrors = Object.values(byRule).reduce((a, b) => a + b, 0)
-  const fileCount = Object.keys(byFile).length
-
-  if (totalErrors === 0) return savings(raw, "no lint errors")
-
-  result.push(`${totalErrors} issues in ${fileCount} files:`)
-
-  // Top rules by count
-  const sortedRules = Object.entries(byRule).sort((a, b) => b[1] - a[1])
-  sortedRules.slice(0, 8).forEach(([rule, count]) => result.push(`  ${rule}: ${count}`))
-
-  // Files with most errors
-  const sortedFiles = Object.entries(byFile).sort((a, b) => b[1].length - a[1].length)
-  sortedFiles.slice(0, 5).forEach(([file, errs]) => {
-    result.push(`${file}: ${errs.length} issues`)
-    errs.slice(0, 2).forEach(e => result.push(`  ${e}`))
-    if (errs.length > 2) result.push(`  ... (${errs.length - 2} more)`)
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    // Strip progress: "Checking...", "Linting..."
+    if (/^(Checking|Linting|Running).*\.\.\.$/.test(t)) return false
+    if (/^\s*\d+\/(\d+)/.test(t)) return false
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    return true
   })
 
-  return savings(raw, result.join("\n"))
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 function filterTsc(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  if (!clean || clean.trim() === "") return savings(raw, "tsc: no errors")
+  if (!clean) return savings(raw, "(no output)")
 
-  // Group by file
-  const byFile: Record<string, string[]> = {}
-  for (const line of lines(clean)) {
-    // TS error: "src/foo.ts(12,34): error TS2345: ..."
-    const m = line.match(/^([^(]+)\((\d+),\d+\):\s+(error|warning)\s+(TS\d+):\s+(.+)$/)
-    if (m) {
-      const [, file, lineNo, , code, msg] = m
-      if (!byFile[file]) byFile[file] = []
-      byFile[file].push(`  ${lineNo}: ${code} ${msg.slice(0, 80)}`)
-    }
-  }
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    // Strip "Found X errors" summary
+    if (/^Found \d+ errors?$/.test(t)) return false
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    return true
+  })
 
-  const totalErrors = Object.values(byFile).flat().length
-  if (totalErrors === 0) return savings(raw, truncate(clean, 20))
-
-  const result: string[] = [`${totalErrors} TypeScript errors in ${Object.keys(byFile).length} files:`]
-  for (const [file, errs] of Object.entries(byFile)) {
-    result.push(file)
-    errs.slice(0, 4).forEach(e => result.push(e))
-    if (errs.length > 4) result.push(`  ... (${errs.length - 4} more)`)
-  }
-
-  return savings(raw, result.join("\n"))
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 function filterRuff(raw: string): FilterResult {
-  // ruff outputs JSON with --format json, or human-readable otherwise
   const clean = stripAnsi(raw).trim()
-  if (!clean) return savings(raw, "ruff: no issues")
+  if (!clean) return savings(raw, "(no output)")
 
-  const byRule: Record<string, number> = {}
-  const errors: string[] = []
-  let total = 0
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    if (/^\s*(\d+)?\s*files?\s+checked/.test(t)) return true
+    return true
+  })
 
-  for (const line of lines(clean)) {
-    // ruff human format: "src/foo.py:12:4: E501 Line too long (100 > 79)"
-    const m = line.match(/^(.+?):(\d+):\d+:\s+([A-Z]\d+)\s+(.+)$/)
-    if (m) {
-      const [, , , code, msg] = m
-      byRule[code] = (byRule[code] || 0) + 1
-      total++
-      if (errors.length < 5) errors.push(`${code}: ${msg.slice(0, 60)}`)
-    }
-  }
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
+}
 
-  if (total === 0) return savings(raw, truncate(clean, 20))
+function filterDockerBuild(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  if (!clean) return savings(raw, "ok")
 
-  const result = [`ruff: ${total} issues`]
-  Object.entries(byRule).sort((a, b) => b[1] - a[1]).slice(0, 6)
-    .forEach(([code, count]) => result.push(`  ${code}: ${count}`))
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    // Strip CACHED step indicators
+    if (t === "CACHED") return false
+    if (/^#\d+\s+\d+\.\d+/.test(t)) return false  // BuildKit step numbers
+    if (/^ ---> Using cache/.test(t)) return false
+    return true  // keep all build output, errors, warnings
+  })
 
-  return savings(raw, result.join("\n"))
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 // ─── Docker / Kubernetes filters ─────────────────────────────────────────────
 
 function filterDockerPs(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const ls = lines(clean)
-  if (ls.length <= 6) return savings(raw, clean)
-
-  // Strip wide columns, keep only: container name, image, status, ports
-  const result: string[] = []
-  for (const line of ls) {
-    // Header or separator
-    if (/^CONTAINER|^---/.test(line)) { result.push(line); continue }
-    // Parse columns by detecting multi-space separators
-    const cols = line.split(/\s{2,}/).map(c => c.trim()).filter(Boolean)
-    if (cols.length >= 5) {
-      // CONTAINER ID, IMAGE, COMMAND, CREATED, STATUS, PORTS, NAMES
-      const name = cols[cols.length - 1]
-      const image = cols[1]
-      const status = cols[4] || cols[3]
-      const ports = cols[5] || ""
-      result.push([name, image, status, ports].filter(Boolean).join("  "))
-    } else {
-      result.push(line)
-    }
-  }
-
-  return savings(raw, result.join("\n"))
+  return savings(raw, deduplicateBlankLines(clean))
 }
 
 function filterDockerLogs(raw: string): FilterResult {
-  return savings(raw, deduplicateLines(stripAnsi(raw), 2))
+  const clean = stripAnsi(raw).trim()
+  return savings(raw, deduplicateBlankLines(clean))
 }
 
 function filterKubectl(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const ls = lines(clean)
-  if (ls.length <= 10) return savings(raw, clean)
-
-  // Keep header + strip wide status columns for pods/services
-  const result = ls.map(line => {
-    // Strip AGE column (last) from kubectl output if present
-    const cols = line.split(/\s{2,}/)
-    if (cols.length > 3 && /^\d+[smhd]$/.test(cols[cols.length - 1].trim())) {
-      return cols.slice(0, -1).join("  ")
-    }
-    return line
-  })
-
-  return savings(raw, result.join("\n"))
+  return savings(raw, deduplicateBlankLines(clean))
 }
 
 // ─── Package manager filters ──────────────────────────────────────────────────
 
 function filterNpmInstall(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  // Strip progress bars and per-package download lines
-  const kept = lines(clean).filter(line => {
-    if (/^(?:npm warn|npm notice|added \d+|updated \d+|audited \d+|found \d+)/.test(line.trim().toLowerCase())) return true
-    if (/^error/i.test(line.trim())) return true
-    return false
+  if (!clean) return savings(raw, "ok")
+
+  // Keep all output, only strip progress bars
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    // Strip npm progress bars
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    if (/^>\s/.test(t)) return false  // pacote progress
+    if (/^npm (http|WARN) fetch/.test(t)) return false
+    return true
   })
 
-  const summary = kept.join("\n") || clean.split("\n").slice(-3).join("\n")
-  return savings(raw, summary)
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
-
-// ─── Build script filter (npm run / yarn run / pnpm run) ─────────────────────
 
 function filterPackageMetadata(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
+  if (!clean) return savings(raw, "(no output)")
+
+  // Try to parse JSON if it looks like package metadata
   const jsonStart = clean.search(/[\[{]/)
   const jsonEnd = Math.max(clean.lastIndexOf("]"), clean.lastIndexOf("}"))
-  const jsonCandidate = jsonStart >= 0 && jsonEnd > jsonStart
-    ? clean.slice(jsonStart, jsonEnd + 1)
-    : clean
-
-  try {
-    const parsed = JSON.parse(jsonCandidate)
-    const item = Array.isArray(parsed) ? parsed[0] : parsed
-    if (item && typeof item === "object") {
-      const pkg = item as Record<string, unknown>
-      const name = typeof pkg.name === "string" ? pkg.name : ""
-      const version = typeof pkg.version === "string" ? pkg.version : ""
-      const files = Array.isArray(pkg.files) ? pkg.files.length : undefined
-      const linesOut = [
-        name || version ? `${name}${version ? `@${version}` : ""}` : "",
-        typeof pkg.filename === "string" ? `filename: ${pkg.filename}` : "",
-        typeof pkg.size === "number" ? `package size: ${pkg.size} bytes` : "",
-        typeof pkg.unpackedSize === "number" ? `unpacked size: ${pkg.unpackedSize} bytes` : "",
-        typeof pkg.entryCount === "number" ? `total files: ${pkg.entryCount}` : "",
-        files !== undefined ? `files listed: ${files}` : "",
-        typeof pkg.integrity === "string" ? `integrity: ${String(pkg.integrity).slice(0, 32)}...` : "",
-      ].filter(Boolean)
-
-      if (linesOut.length > 0) return savings(raw, linesOut.join("\n"))
-    }
-  } catch {
-    // Non-JSON package output falls through to line filtering.
-  }
-
-  const ls = lines(clean).filter(Boolean)
-  if (ls.length <= 12 && clean.length <= 1200) return savings(raw, clean)
-
-  const kept: string[] = []
-  const seen = new Set<string>()
-  for (const line of ls) {
-    const t = line.trim()
-    if (
-      IMPORTANT_LINE_RE.test(t) ||
-      /^npm (notice|warn|error)/i.test(t) ||
-      /^(name|version|filename|package size|unpacked size|total files|integrity|shasum):/i.test(t) ||
-      /^[-+]?v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(t) ||
-      /^\S+@\d+\.\d+\.\d+/.test(t)
-    ) {
-      uniquePush(kept, seen, t)
+  if (jsonStart >= 0 && jsonEnd > jsonStart) {
+    try {
+      const parsed = JSON.parse(clean.slice(jsonStart, jsonEnd + 1))
+      const pretty = JSON.stringify(parsed, null, 2)
+      return savings(raw, deduplicateBlankLines(pretty))
+    } catch {
+      // Not valid JSON, fall through
     }
   }
 
-  if (kept.length === 0) {
-    return savings(raw, truncateImportant(clean, 24))
-  }
-
-  const omitted = Math.max(0, ls.length - kept.length)
-  if (omitted > 0) kept.push(`... (${omitted} package metadata lines omitted)`)
-  return savings(raw, kept.slice(0, 30).join("\n"))
+  // Keep all content, dedup blank lines
+  return savings(raw, deduplicateBlankLines(clean))
 }
 
 function filterNpmRunScript(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const ls = lines(clean)
-  if (ls.length <= 20) return savings(raw, clean)
+  if (!clean) return savings(raw, "ok")
 
-  // Keep error lines, success summary, and warnings
-  const kept = ls.filter(l => {
+  // Keep all build output, only strip spinners/progress
+  const lines = clean.split("\n").filter(l => {
     const t = l.trim()
-    // Vite/esbuild success
-    if (/built in|✓ built|dist\/|Build complete/i.test(t)) return true
-    // Webpack success
-    if (/compiled successfully|webpack \d/i.test(t)) return true
-    // tsc inside build
-    if (/error TS\d+|\.ts\(\d+,\d+\)/i.test(t)) return true
-    // Generic error/warning
-    if (/^error[:\s]|^ERROR[:\s]|failed to compile/i.test(t)) return true
-    if (/warning[:\s]/i.test(t) && t.length < 120) return true
-    // Asset size table (keep but truncate each line)
-    if (/\.(js|css|html|wasm)\s+[\d.]+\s*(kB|MB|B)/i.test(t)) return true
-    return false
-  }).map(l => l.slice(0, 120))  // cap line length
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    if (/^>\s/.test(t)) return false
+    return true
+  })
 
-  const output = kept.length > 0 ? kept.join("\n") : ls.slice(-5).join("\n")
-  return savings(raw, truncate(output, 40))
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 // ─── pip / uv install filter ─────────────────────────────────────────────────
 
 function filterPipInstall(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const kept = lines(clean).filter(l => {
+  if (!clean) return savings(raw, "ok")
+
+  const lines = clean.split("\n").filter(l => {
     const t = l.trim()
-    return /^Successfully installed|^ERROR|^error|^Requirement already|^WARNING|^warning/i.test(t)
+    // Strip pip progress bars
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    if (/^Collecting\s+/.test(t) && t.length < 30) return false
+    if (/^Downloading\s+/.test(t)) return false
+    if (/^Installing collected packages/.test(t)) return false
+    return true  // keep errors, warnings, "Successfully installed", "Requirement already satisfied"
   })
-  return savings(raw, kept.join("\n") || clean.split("\n").slice(-2).join("\n"))
+
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 // ─── brew filter ─────────────────────────────────────────────────────────────
 
 function filterBrew(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const kept = lines(clean).filter(l => {
+  if (!clean) return savings(raw, "ok")
+
+  const lines = clean.split("\n").filter(l => {
     const t = l.trim()
-    return /^==> Summary|^Error:|^Warning:|already installed|🍺|\binstalled\b|\bpoured\b/i.test(t)
+    if (/^==> Downloading/.test(t)) return false
+    if (/^==> Pouring/.test(t)) return false
+    if (/^==> Caveats/.test(t)) return true
+    if (/^==> Summary/.test(t)) return true
+    if (/^Error:/.test(t)) return true
+    if (/^Warning:/.test(t)) return true
+    if (/already installed/.test(t)) return true
+    if (/🍺/.test(t)) return true
+    if (/\binstalled\b/.test(t)) return true
+    if (/\bpoured\b/.test(t)) return true
+    return true
   })
-  return savings(raw, kept.join("\n") || clean.split("\n").slice(-3).join("\n"))
+
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 // ─── make filter ─────────────────────────────────────────────────────────────
 
 function filterMake(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const kept = lines(clean).filter(l => {
-    return /^make[\[:]|error:|warning:|Error \d|\*\*\* /i.test(l)
+  if (!clean) return savings(raw, "ok")
+
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    // Strip "Building X", "Scanning deps", progress, directory enter/leave
+    if (/^\[\s*\d+%\s*\]\s+(Building|Scanning|Linking)/.test(t)) return false
+    if (/^make\[\d+\]: (Entering|Leaving) directory/.test(t)) return false
+    return true  // keep all errors, warnings, "make[1]: *** [target] Error", commands
   })
-  if (kept.length === 0) {
-    return savings(raw, /is up to date|nothing to be done/i.test(clean) ? "make: up to date" : "make: ok")
-  }
-  return savings(raw, kept.slice(0, 30).join("\n"))
+
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 // ─── curl / wget filter ──────────────────────────────────────────────────────
 
 function filterHttpOutput(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  // Strip curl verbose lines (> request, < response headers, * info)
-  const stripped = lines(clean)
-    .filter(l => !/^[>*]\s|^< /.test(l))
-    .join("\n")
-    .trim()
-  // JSON: truncate body aggressively
-  if (stripped.startsWith("{") || stripped.startsWith("[")) {
-    return savings(raw, truncate(stripped, 50))
-  }
-  return savings(raw, truncate(stripped, 60))
+  if (!clean) return savings(raw, "(no output)")
+
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    // Strip curl/wget progress bars and spinners
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    if (/^\s*(\d+(\.\d+)?[KM]?B\/s|ETA|\d+%\s*$)/.test(t)) return false
+    if (/^[>*]\s/.test(t)) return false  // curl verbose > request, < response
+    return true  // keep status line, headers, body
+  })
+
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 // ─── go build / mod filter ───────────────────────────────────────────────────
@@ -886,47 +623,59 @@ function filterHttpOutput(raw: string): FilterResult {
 function filterGoBuild(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
   if (!clean) return savings(raw, "ok")
-  const kept = lines(clean).filter(l => /\.go:\d+:\d+:|^#|^FAIL|^ok\s/.test(l))
-  return savings(raw, kept.join("\n") || clean.split("\n").slice(-3).join("\n"))
+
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    if (/^\s*[\/\\|]\s*\d+%?\s*$/.test(t)) return false
+    if (/^go: (downloading|verifying|extracting)/.test(t)) return false
+    return true  // keep all errors, warnings, file:line output
+  })
+
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 function filterGoMod(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const kept = lines(clean).filter(l => /^go:|error|warning/i.test(l.trim()))
-  return savings(raw, kept.join("\n") || (clean.length < 200 ? clean : "ok"))
-}
+  if (!clean) return savings(raw, "ok")
 
-// ─── gh CLI filter ───────────────────────────────────────────────────────────
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    if (/^go: (downloading|verifying|extracting)/.test(t)) return false
+    return true
+  })
 
-function filterGhCli(raw: string): FilterResult {
-  const clean = stripAnsi(raw).trim()
-  const ls = lines(clean)
-  if (ls.length <= 10) return savings(raw, clean)
-  // Normalize wide column padding, cap line length
-  const result = ls.map(l => l.replace(/\s{3,}/g, "  ").slice(0, 120))
-  return savings(raw, result.join("\n"))
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 // ─── xcodebuild / swift build filter ─────────────────────────────────────────
 
 function filterXcode(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const kept = lines(clean).filter(l =>
-    /error:|warning:|BUILD SUCCEEDED|BUILD FAILED|\*\* BUILD/i.test(l)
-  )
-  if (kept.length === 0) {
-    return savings(raw, /BUILD SUCCEEDED/i.test(clean) ? "BUILD SUCCEEDED" : truncate(clean, 20))
-  }
-  return savings(raw, kept.slice(0, 40).join("\n"))
+  if (!clean) return savings(raw, "ok")
+
+  const lines = clean.split("\n").filter(l => {
+    const t = l.trim()
+    // Strip "Compiling", "Linking", progress bars
+    if (/^\[\s*\d+\/\d+\]/.test(t)) return false
+    if (/^\s*(Compile|Link|Copy|Process|Generate|Sign|Touch)\s+/.test(t)) return false
+    return true  // keep all errors, warnings, build status
+  })
+
+  return savings(raw, deduplicateBlankLines(lines.join("\n")))
 }
 
 // ─── Generic fallback filter ──────────────────────────────────────────────────
 
 function filterGeneric(raw: string): FilterResult {
   const clean = stripAnsi(raw).trim()
-  const deduped = deduplicateLines(clean)
-  const truncated = truncateImportant(deduped, 80)
-  return savings(raw, truncated)
+  return savings(raw, deduplicateBlankLines(clean))
+}
+
+// ─── gh CLI filter ───────────────────────────────────────────────────────────
+
+function filterGhCli(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  return savings(raw, deduplicateBlankLines(clean))
 }
 
 // ─── Command router ───────────────────────────────────────────────────────────
@@ -936,7 +685,16 @@ function filterGeneric(raw: string): FilterResult {
  * e.g. "git status --short" → tokens: ["git", "status"]
  */
 function parseCommand(command: string): string[] {
-  return command.trim().split(/\s+/).slice(0, 4)
+  const segments = command.trim().split(/\s+(?:&&|\|\||;)\s+/)
+  const active = segments[segments.length - 1] ?? command
+  const tokens = active.trim().split(/\s+/).filter(Boolean)
+  while (/^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[0] ?? "")) tokens.shift()
+  if (tokens[0] === "env") {
+    tokens.shift()
+    while (/^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[0] ?? "")) tokens.shift()
+  }
+  if (tokens[0] === "time" || tokens[0] === "command" || tokens[0] === "noglob") tokens.shift()
+  return tokens.slice(0, 8)
 }
 
 /**
@@ -974,6 +732,13 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
     (cmd === "pnpm" && sub === "run")
   ) { return filterNpmRunScript(rawOutput) }
 
+  if ((cmd === "bun" && sub === "run") || (cmd === "deno" && sub === "task")) {
+    return filterNpmRunScript(rawOutput)
+  }
+  if (cmd === "turbo" || cmd === "nx" || cmd === "vite" || cmd === "next") {
+    return filterNpmRunScript(rawOutput)
+  }
+
   if (
     (cmd === "npm" && ["pack", "publish", "view", "info", "show", "version"].includes(sub ?? "")) ||
     (cmd === "yarn" && ["pack", "publish", "info", "npm"].includes(sub ?? "")) ||
@@ -984,6 +749,18 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
   if (cmd === "pnpm" && sub === "dlx" && sub2) {
     return filterBashOutput(tokens.slice(2).join(" "), rawOutput)
   }
+  if ((cmd === "npx" || cmd === "bunx" || cmd === "uvx") && sub) {
+    return filterBashOutput(tokens.slice(1).join(" "), rawOutput)
+  }
+  if ((cmd === "npm" && sub === "exec" && sub2) || (cmd === "pnpm" && sub === "exec" && sub2) || (cmd === "yarn" && sub === "dlx" && sub2)) {
+    return filterBashOutput(tokens.slice(2).join(" "), rawOutput)
+  }
+  if (cmd === "uv" && sub === "run" && sub2) {
+    return filterBashOutput(tokens.slice(2).join(" "), rawOutput)
+  }
+  if ((cmd === "poetry" && sub === "run" && sub2) || (cmd === "pipenv" && sub === "run" && sub2) || (cmd === "bundle" && sub === "exec" && sub2)) {
+    return filterBashOutput(tokens.slice(2).join(" "), rawOutput)
+  }
 
   // ── Test runners ──────────────────────────────────────────────────────────
   if (
@@ -991,7 +768,10 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
     (cmd === "npx"   && (sub === "jest" || sub === "vitest" || sub === "mocha")) ||
     (cmd === "yarn"  && sub === "test") ||
     (cmd === "pnpm"  && sub === "test") ||
-    cmd === "jest" || cmd === "vitest" || cmd === "mocha"
+    (cmd === "bun"   && sub === "test") ||
+    (cmd === "deno"  && sub === "test") ||
+    cmd === "jest" || cmd === "vitest" || cmd === "mocha" ||
+    cmd === "tox" || cmd === "nox" || cmd === "phpunit" || cmd === "pest"
   ) { return filterTestOutput(rawOutput) }
 
   if (cmd === "cargo" && (sub === "test" || (sub === "nextest" && sub2 === "run"))) {
@@ -1015,7 +795,22 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
   if (cmd === "rspec") {
     return filterTestOutput(rawOutput)
   }
-  if (cmd === "npx" && sub === "playwright") {
+  if (cmd === "playwright" || (cmd === "npx" && sub === "playwright")) {
+    return filterTestOutput(rawOutput)
+  }
+  if ((cmd === "mvn" || cmd === "mvnw" || cmd === "./mvnw") && ["test", "verify", "package", "install"].includes(sub ?? "")) {
+    return filterTestOutput(rawOutput)
+  }
+  if ((cmd === "gradle" || cmd === "gradlew" || cmd === "./gradlew") && /test|check|build/i.test(sub ?? "")) {
+    return filterTestOutput(rawOutput)
+  }
+  if (cmd === "dotnet" && ["test", "build", "run"].includes(sub ?? "")) {
+    return filterTestOutput(rawOutput)
+  }
+  if (cmd === "mix" && (sub === "test" || sub === "compile")) {
+    return sub === "test" ? filterTestOutput(rawOutput) : filterGeneric(rawOutput)
+  }
+  if (cmd === "composer" && ["test", "phpunit"].includes(sub ?? "")) {
     return filterTestOutput(rawOutput)
   }
 
@@ -1028,6 +823,9 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
   }
   if (cmd === "ruff") {
     return filterRuff(rawOutput)
+  }
+  if (cmd === "mypy" || cmd === "pyright" || cmd === "pylint") {
+    return filterTestOutput(rawOutput)
   }
   if (cmd === "cargo" && (sub === "build" || sub === "clippy" || sub === "check")) {
     return filterTestOutput(rawOutput) // reuse test filter — handles error extraction
@@ -1069,6 +867,9 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
     if (sub === "test") return filterTestOutput(rawOutput)
     return filterMake(rawOutput)
   }
+  if (cmd === "cmake" || cmd === "ninja" || cmd === "meson") {
+    return filterMake(rawOutput)
+  }
   if (cmd === "xcodebuild" || (cmd === "swift" && (sub === "build" || sub === "run" || sub === "test"))) {
     return filterXcode(rawOutput)
   }
@@ -1094,17 +895,7 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
   if (cmd === "docker") {
     if (sub === "ps" || sub === "images") return filterDockerPs(rawOutput)
     if (sub === "logs")                   return filterDockerLogs(rawOutput)
-    if (sub === "build") {
-      // Docker build: keep only step headers, errors, and the final summary
-      const clean = stripAnsi(rawOutput)
-      const kept = lines(clean).filter(l =>
-        /^Step\s+\d+/i.test(l) ||
-        /^(ERROR|error|Successfully built|Successfully tagged|\[Error\])/i.test(l) ||
-        /---> (Running|Using cache)/.test(l) ||
-        /^Removing intermediate/.test(l)
-      )
-      return savings(rawOutput, kept.length ? kept.join("\n") : truncate(clean, 30))
-    }
+    if (sub === "build") return filterDockerBuild(rawOutput)
     return filterGeneric(rawOutput)
   }
   if (cmd === "docker-compose" || (cmd === "docker" && sub === "compose")) {
@@ -1112,6 +903,9 @@ export function filterBashOutput(command: string, rawOutput: string): FilterResu
   }
   if (cmd === "kubectl") {
     return filterKubectl(rawOutput)
+  }
+  if (cmd === "helm" || cmd === "terraform") {
+    return filterGeneric(rawOutput)
   }
 
   // ── Generic fallback ──────────────────────────────────────────────────────

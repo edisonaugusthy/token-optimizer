@@ -132,6 +132,46 @@ export function applySlimDescription(toolID: string, currentDescription: string)
   return slim
 }
 
+function cleanDescription(description: string): string {
+  let text = description.replace(/\s+/g, " ").trim()
+  text = text.replace(/\b(?:for example|example|examples|e\.g\.)[:\s].*$/i, "").trim()
+  text = text.replace(/\bdefaults? to\b.*$/i, "").trim()
+  text = text.replace(/\bif omitted\b.*$/i, "").trim()
+  text = text.replace(/\bthis parameter\b/gi, "parameter")
+  text = text.replace(/[`*_>#|]/g, "")
+  if (text.length <= 90) return text
+  const sentenceEnd = text.slice(0, 90).lastIndexOf(".")
+  if (sentenceEnd > 24) return text.slice(0, sentenceEnd + 1)
+  const wordEnd = text.slice(0, 72).lastIndexOf(" ")
+  return wordEnd > 24 ? text.slice(0, wordEnd) : text.slice(0, 72)
+}
+
+export function cleanSchemaDescriptions(value: unknown): void {
+  if (!value || typeof value !== "object") return
+  if (Array.isArray(value)) {
+    for (const item of value) cleanSchemaDescriptions(item)
+    return
+  }
+
+  const obj = value as Record<string, unknown>
+  if (typeof obj.description === "string") {
+    const cleaned = cleanDescription(obj.description)
+    if (cleaned && cleaned.length < obj.description.length) {
+      obj.description = cleaned
+    }
+  }
+  if (typeof obj.title === "string" && obj.title.length > 80) {
+    delete obj.title
+  }
+  if (typeof obj.examples !== "undefined") {
+    delete obj.examples
+  }
+
+  for (const child of Object.values(obj)) {
+    cleanSchemaDescriptions(child)
+  }
+}
+
 // ─── Line-range edit expansion ────────────────────────────────────────────────
 
 /** Matches "55" or "55-64" or "55 - 64" */

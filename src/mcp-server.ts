@@ -44,7 +44,7 @@ const TOOLS = [
       "Pass the raw stdout/stderr from any shell command or file-read result. " +
       "Returns a compressed version with noise stripped (passing tests, progress bars, " +
       "duplicate lines, binary diffs, boilerplate) while preserving all errors and failures. " +
-      "Achieves 60-75% token reduction on typical CI/test/lint output.",
+      "Reduces noisy CI/test/lint output before it reaches the agent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -86,7 +86,7 @@ function handleFilterOutput(params: Record<string, unknown>): string {
   }
 
   // bash (default)
-  const r = filterBashOutput(raw, command);
+  const r = filterBashOutput(command, raw);
   return r.output;
 }
 

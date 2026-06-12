@@ -211,6 +211,47 @@ function Install-TokenOptimizer {
         Write-Warn "Could not verify filter.js (non-fatal)"
     }
     
+    $CommandShim = Join-Path $ConfigDir "token-optimizer.cmd"
+    @"
+@echo off
+set "FILTER=%USERPROFILE%\.config\token-optimizer\filter.js"
+if "%~1"=="" goto status
+if /I "%~1"=="status" goto status
+if /I "%~1"=="stats" (
+  node "%FILTER%" stats
+  exit /b %ERRORLEVEL%
+)
+if /I "%~1"=="reset-stats" (
+  node "%FILTER%" reset-stats
+  exit /b %ERRORLEVEL%
+)
+if /I "%~1"=="run" (
+  shift
+  node "%FILTER%" %*
+  exit /b %ERRORLEVEL%
+)
+if /I "%~1"=="filter" (
+  shift
+  node "%FILTER%" %*
+  exit /b %ERRORLEVEL%
+)
+node "%FILTER%" %*
+exit /b %ERRORLEVEL%
+:status
+echo token-optimizer - status
+echo Filter path: %FILTER%
+if exist "%FILTER%" (
+  echo Filter exists: yes
+  echo.
+  node "%FILTER%" stats
+) else (
+  echo Filter exists: no
+  echo Run the installer again to restore filter.js.
+  exit /b 1
+)
+"@ | Set-Content -Path $CommandShim -Encoding ASCII
+    Write-Success "Installed command: $CommandShim"
+
     # Add config directory to PATH
     $UserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
     if ($UserPath -notlike "*$ConfigDir*") {
@@ -268,6 +309,9 @@ function Install-TokenOptimizer {
         Write-Host "AGENTS.md created/updated for: $($AgentsWithConfig -join ', ')" -ForegroundColor White
     }
     Write-Host "Usage:" -ForegroundColor White
+    Write-Host "  token-optimizer                  # status" -ForegroundColor Cyan
+    Write-Host "  token-optimizer stats            # token totals" -ForegroundColor Cyan
+    Write-Host "  token-optimizer run <command>     # filter one command" -ForegroundColor Cyan
     Write-Host "  node ~/.config/token-optimizer/filter.js <command>" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Commands:" -ForegroundColor White

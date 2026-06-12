@@ -38,7 +38,12 @@ interface FilterResult {
 }
 
 function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4)
+  if (!text) return 0
+  const len = text.length
+  // Weighted estimation: JSON/code is denser (fewer tokens per char)
+  if (text.includes("{") && text.includes(":")) return Math.ceil(len / 3)   // JSON/code
+  if (text.includes("import ") || text.includes("export ")) return Math.ceil(len / 3.5)  // code
+  return Math.ceil(len / 4)  // plain text
 }
 
 function savings(original: string, filtered: string): FilterResult {
@@ -78,7 +83,11 @@ function deduplicateLines(text: string, maxRepeats = 1): string {
 }
 
 function stripAnsi(text: string): string {
-  return text.replace(/\x1B\[[0-9;]*[mGKHF]/g, "")
+  return text
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, "")    // CSI sequences
+    .replace(/\x1B\[\?[0-9;]*[A-Za-z]/g, "")  // private mode (DECCKM, etc.)
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, "") // OSC sequences
+    .replace(/\x1B[()][AB01]/g, "")            // charset selection
 }
 
 function truncate(text: string, maxLines: number): string {
@@ -241,7 +250,17 @@ function filterGitWriteOp(raw: string, cmd: string): FilterResult {
     return savings(raw, `ok ${branch}`)
   }
   if (cmd === "add")  return savings(raw, "ok")
-  if (cmd === "pull") {
+  if (cmd === "fetch") {
+    const refs = splitLines(clean).filter(l => l.includes("->") || l.includes("new commit"))
+    return savings(raw, refs.length ? refs.join("\n") : "ok")
+  }
+  if (cmd === "pull" || cmd === "merge") {
+    const lines = splitLines(clean).filter(l =>
+      l.includes("Updating") || l.includes("Fast-forward") ||
+      l.includes("Already up to date") || l.includes("files changed") ||
+      l.includes("Merge made")
+    )
+    if (lines.length) return savings(raw, lines.join("\n"))
     const filesMatch = clean.match(/(\d+) file/)
     const parts = ["ok"]
     if (filesMatch) parts.push(`${filesMatch[1]}f`)
@@ -467,6 +486,174 @@ function filterDockerPs(raw: string): FilterResult {
   return savings(raw, result.join("\n"))
 }
 
+// ── Ruff (Python linter) ─────────────────────────────────────────────────────
+
+function filterRuff(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean)
+  const passLine = ls.find(l => /All checks passed/i.test(l))
+  if (passLine) return savings(raw, "All checks passed")
+  const errLine = ls.find(l => /Found \d+ error/i.test(l))
+  const errors = ls.filter(l => /^\s*\d+\s+\w+/.test(l))
+  if (errors.length === 0 && errLine) return savings(raw, errLine)
+  if (errors.length === 0) return savings(raw, clean)
+  const compact = errors.slice(0, 15).map(l => {
+    const m = l.match(/^(\S+:\d+:\d+:\s*\w+)/)
+    return m ? m[1] : l.trim()
+  })
+  if (errors.length > 15) compact.push(`... (${errors.length - 15} more)`)
+  return savings(raw, compact.join("\n"))
+}
+
+// ── Go build / go vet ────────────────────────────────────────────────────────
+
+function filterGoBuild(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  if (!clean) return savings(raw, "(no output - success)")
+  const ls = splitLines(clean)
+  const errors = ls.filter(l => /error|cannot|undefined|unused/i.test(l))
+  if (errors.length === 0) return savings(raw, "(no output - success)")
+  return savings(raw, errors.join("\n"))
+}
+
+// ── Go mod ───────────────────────────────────────────────────────────────────
+
+function filterGoMod(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean).filter(l =>
+    !l.startsWith("go: downloading") &&
+    !l.startsWith("go: verifying") &&
+    !l.startsWith("go: extracting")
+  )
+  return savings(raw, ls.length ? ls.join("\n") : "ok")
+}
+
+// ── Brew ─────────────────────────────────────────────────────────────────────
+
+function filterBrew(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean).filter(l =>
+    !l.includes("Already downloaded") &&
+    !l.includes("already installed") &&
+    !l.includes("Skipping") &&
+    !l.startsWith("==> Downloading")
+  )
+  return savings(raw, ls.length ? ls.join("\n") : "ok")
+}
+
+// ── Make / CMake ─────────────────────────────────────────────────────────────
+
+function filterMake(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean)
+  if (clean.includes("Building") || clean.includes("Scanning")) {
+    const errors = ls.filter(l => /error|fatal|cannot/i.test(l))
+    const built = ls.filter(l => /\[\s*\d+%\]/.test(l))
+    const last = built[built.length - 1] || ""
+    if (errors.length) return savings(raw, errors.join("\n"))
+    return savings(raw, last || "ok")
+  }
+  const errors = ls.filter(l => /error|fatal|cannot/i.test(l))
+  const built = ls.filter(l => /\[\d+\]/.test(l))
+  if (errors.length) return savings(raw, errors.join("\n"))
+  if (built.length > 3) {
+    return savings(raw, `Built ${built.length} targets. Last: ${built[built.length - 1].trim()}`)
+  }
+  return savings(raw, clean)
+}
+
+// ── HTTP output (curl/wget/httpie) ───────────────────────────────────────────
+
+function filterHttpOutput(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean)
+  const statusLine = ls.find(l => /^HTTP\/\d/.test(l) || /^HTTP\s+\d{3}/.test(l))
+  if (statusLine) {
+    const status = statusLine.match(/HTTP\/\S*\s+(\d{3})/)?.[1] || statusLine.match(/\s(\d{3})/)?.[1] || ""
+    const contentType = ls.find(l => /^content-type:/i.test(l))
+    const bodyStart = ls.findIndex((l, i) => l.trim() === "" && i > 3)
+    const body = bodyStart >= 0 ? ls.slice(bodyStart + 1).join("\n").trim() : ""
+    const parts = [`HTTP ${status}`]
+    if (contentType) parts.push(contentType.trim())
+    if (body) parts.push(body.slice(0, 200))
+    return savings(raw, parts.join("\n"))
+  }
+  return savings(raw, truncateImportant(deduplicateLines(clean), 30))
+}
+
+// ── Xcode (xcodebuild) ──────────────────────────────────────────────────────
+
+function filterXcode(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean)
+  const useful = ls.filter(l =>
+    /error:|warning:| BUILD |failed|succeeded|SUCCEED|FAIL/i.test(l)
+  )
+  if (useful.length === 0) {
+    const buildLine = ls.find(l => /\*\* BUILD /i.test(l))
+    return savings(raw, buildLine || "ok")
+  }
+  return savings(raw, useful.slice(0, 20).join("\n"))
+}
+
+// ── npm run / yarn run (strip lifecycle noise) ───────────────────────────────
+
+function filterNpmRunScript(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean).filter(l =>
+    !l.match(/^>/) &&
+    !l.startsWith("Leaving directory") &&
+    !l.match(/^npm (info|warn)/) &&
+    !l.match(/^yarn (info|warning)/)
+  )
+  return savings(raw, truncateImportant(ls.join("\n"), 40))
+}
+
+// ── pip install ──────────────────────────────────────────────────────────────
+
+function filterPipInstall(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean).filter(l =>
+    !l.includes("Already satisfied") &&
+    !l.startsWith("Collecting ") &&
+    !l.includes("Downloading") &&
+    !l.includes("Installing collected packages")
+  )
+  const errors = ls.filter(l => /error|ERROR|failed/i.test(l))
+  if (errors.length) return savings(raw, errors.join("\n"))
+  return savings(raw, ls.length ? ls.join("\n") : "ok")
+}
+
+// ── Docker build ─────────────────────────────────────────────────────────────
+
+function filterDockerBuild(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean)
+  const stripped = ls.filter(l =>
+    !l.includes("CACHED") &&
+    !l.match(/^#\d+ \d+\.\d+/) &&
+    !l.startsWith(" ---> Using cache")
+  )
+  const errors = stripped.filter(l => /error|ERROR|denied|denied|failed/i.test(l))
+  if (errors.length) return savings(raw, errors.join("\n"))
+  const steps = stripped.filter(l => /^--->/.test(l))
+  if (steps.length) {
+    const last = steps[steps.length - 1]
+    return savings(raw, `${steps.length} steps. ${last}`)
+  }
+  return savings(raw, truncateImportant(deduplicateLines(stripped.join("\n"), 1), 15))
+}
+
+// ── git diff --stat ──────────────────────────────────────────────────────────
+
+function filterGitDiffStat(raw: string): FilterResult {
+  const clean = stripAnsi(raw).trim()
+  const ls = splitLines(clean)
+  const summary = ls.find(l => /files? changed/i.test(l))
+  if (summary) return savings(raw, summary.trim())
+  return savings(raw, truncateImportant(deduplicateLines(clean), 20))
+}
+
 // ── Generic fallback ──────────────────────────────────────────────────────────
 
 function filterPackageMetadata(raw: string): FilterResult {
@@ -535,20 +722,38 @@ function filterGeneric(raw: string): FilterResult {
 
 // ── Main router ───────────────────────────────────────────────────────────────
 
+function parseCommand(command: string): string[] {
+  const segments = command.trim().split(/\s+(?:&&|\|\||;)\s+/)
+  const active = segments[segments.length - 1] ?? command
+  const tokens = active.trim().split(/\s+/).filter(Boolean)
+  while (/^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[0] ?? "")) tokens.shift()
+  if (tokens[0] === "env") {
+    tokens.shift()
+    while (/^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[0] ?? "")) tokens.shift()
+  }
+  if (tokens[0] === "time" || tokens[0] === "command" || tokens[0] === "noglob") tokens.shift()
+  return tokens.slice(0, 8)
+}
+
 function filterBashOutput(command: string, rawOutput: string): FilterResult {
   if (!rawOutput || rawOutput.trim() === "") return { output: rawOutput, savedPct: 0 }
-  const tokens = command.trim().split(/\s+/).slice(0, 4)
-  const [cmd, sub] = tokens
+  const tokens = parseCommand(command)
+  const [cmd, sub, sub2] = tokens
 
   if (cmd === "git") {
     switch (sub) {
       case "status":           return filterGitStatus(rawOutput)
-      case "diff": case "show": return filterGitDiff(rawOutput)
+      case "diff":
+        if (command.includes("--stat")) return filterGitDiffStat(rawOutput)
+        return filterGitDiff(rawOutput)
+      case "show":             return filterGitDiff(rawOutput)
       case "log":              return filterGitLog(rawOutput)
       case "add":              return filterGitWriteOp(rawOutput, "add")
       case "commit":           return filterGitWriteOp(rawOutput, "commit")
       case "push":             return filterGitWriteOp(rawOutput, "push")
-      case "pull": case "merge": return filterGitWriteOp(rawOutput, "pull")
+      case "pull":             return filterGitWriteOp(rawOutput, "pull")
+      case "merge":            return filterGitWriteOp(rawOutput, "merge")
+      case "fetch":            return filterGitWriteOp(rawOutput, "fetch")
       default:                 return filterGeneric(rawOutput)
     }
   }
@@ -562,11 +767,13 @@ function filterBashOutput(command: string, rawOutput: string): FilterResult {
   if ((cmd === "npm" && sub === "test") ||
       (cmd === "npx" && (sub === "jest" || sub === "vitest" || sub === "mocha")) ||
       (cmd === "yarn" && sub === "test") || (cmd === "pnpm" && sub === "test") ||
+      (cmd === "bun" && sub === "test") || (cmd === "deno" && sub === "test") ||
       cmd === "jest" || cmd === "vitest" || cmd === "mocha" ||
       (cmd === "cargo" && sub === "test") ||
       cmd === "pytest" || cmd === "py.test" ||
       (cmd === "go" && sub === "test") ||
-      cmd === "rspec") {
+      cmd === "rspec" || cmd === "tox" || cmd === "nox" ||
+      cmd === "phpunit" || cmd === "pest" || cmd === "playwright") {
     return filterTestOutput(rawOutput)
   }
 
@@ -576,17 +783,79 @@ function filterBashOutput(command: string, rawOutput: string): FilterResult {
   if (cmd === "tsc" || (cmd === "npx" && sub === "tsc")) {
     return filterTsc(rawOutput)
   }
+  if (cmd === "ruff" || (cmd === "npx" && sub === "ruff")) {
+    return filterRuff(rawOutput)
+  }
+  if (cmd === "mypy" || cmd === "pyright" || cmd === "pylint") {
+    return filterTestOutput(rawOutput)
+  }
   if (cmd === "ls" || cmd === "dir") return filterLs(rawOutput)
   if (cmd === "find" || cmd === "tree") return filterLs(rawOutput)
   if (cmd === "grep" || cmd === "rg" || cmd === "ag") return filterGrep(rawOutput)
+  if (cmd === "make" || cmd === "cmake" || cmd === "ninja" || cmd === "meson") {
+    return filterMake(rawOutput)
+  }
+  if (cmd === "go" && ["build", "vet", "test"].includes(sub ?? "")) {
+    if (sub === "test") return filterTestOutput(rawOutput)
+    return filterGoBuild(rawOutput)
+  }
+  if (cmd === "go" && sub === "mod") return filterGoMod(rawOutput)
+  if (cmd === "brew") return filterBrew(rawOutput)
+  if (cmd === "curl" || cmd === "wget" || cmd === "http" || cmd === "httpie") {
+    return filterHttpOutput(rawOutput)
+  }
+  if (cmd === "xcodebuild") return filterXcode(rawOutput)
+  if ((cmd === "npm" || cmd === "yarn" || cmd === "pnpm") && sub === "run") {
+    return filterNpmRunScript(rawOutput)
+  }
+  if ((cmd === "bun" && sub === "run") || (cmd === "deno" && sub === "task")) {
+    return filterNpmRunScript(rawOutput)
+  }
+  if (cmd === "turbo" || cmd === "nx" || cmd === "vite" || cmd === "next") {
+    return filterNpmRunScript(rawOutput)
+  }
+  if ((cmd === "npx" || cmd === "bunx" || cmd === "uvx") && sub) {
+    return filterBashOutput(tokens.slice(1).join(" "), rawOutput)
+  }
+  if ((cmd === "npm" && sub === "exec" && sub2) || (cmd === "pnpm" && sub === "exec" && sub2) || (cmd === "yarn" && sub === "dlx" && sub2)) {
+    return filterBashOutput(tokens.slice(2).join(" "), rawOutput)
+  }
+  if (cmd === "uv" && sub === "run" && sub2) {
+    return filterBashOutput(tokens.slice(2).join(" "), rawOutput)
+  }
+  if ((cmd === "poetry" && sub === "run" && sub2) || (cmd === "pipenv" && sub === "run" && sub2) || (cmd === "bundle" && sub === "exec" && sub2)) {
+    return filterBashOutput(tokens.slice(2).join(" "), rawOutput)
+  }
+  if ((cmd === "mvn" || cmd === "mvnw" || cmd === "./mvnw") && ["test", "verify", "package", "install"].includes(sub ?? "")) {
+    return filterTestOutput(rawOutput)
+  }
+  if ((cmd === "gradle" || cmd === "gradlew" || cmd === "./gradlew") && /test|check|build/i.test(sub ?? "")) {
+    return filterTestOutput(rawOutput)
+  }
+  if (cmd === "dotnet" && ["test", "build", "run"].includes(sub ?? "")) {
+    return filterTestOutput(rawOutput)
+  }
+  if (cmd === "mix" && (sub === "test" || sub === "compile")) {
+    return sub === "test" ? filterTestOutput(rawOutput) : filterGeneric(rawOutput)
+  }
+  if (cmd === "composer" && ["test", "phpunit"].includes(sub ?? "")) {
+    return filterTestOutput(rawOutput)
+  }
+  if (cmd === "pip" || cmd === "pip3") {
+    if (sub === "install") return filterPipInstall(rawOutput)
+  }
   if (cmd === "docker") {
     if (sub === "ps" || sub === "images") return filterDockerPs(rawOutput)
     if (sub === "logs") return savings(rawOutput, deduplicateLines(stripAnsi(rawOutput), 2))
+    if (sub === "build") return filterDockerBuild(rawOutput)
     return filterGeneric(rawOutput)
   }
   if (cmd === "kubectl") {
     const clean = stripAnsi(rawOutput).trim()
     return savings(rawOutput, truncate(clean, 30))
+  }
+  if (cmd === "helm" || cmd === "terraform") {
+    return filterGeneric(rawOutput)
   }
 
   return filterGeneric(rawOutput)
@@ -728,7 +997,26 @@ function main(): void {
     existing.filteredTokens += estimateTokens(finalOutput)
     existing.count++
     stats.bySurface[surface] = existing
+
+    // Periodic cleanup: reset stats every 1000 commands to prevent unbounded growth
+    if (stats.commandCount % 1000 === 0) {
+      stats.totalOriginalTokens = Math.round(stats.totalOriginalTokens * 0.1)
+      stats.totalFilteredTokens = Math.round(stats.totalFilteredTokens * 0.1)
+      // Keep bySurface but reduce
+      for (const key of Object.keys(stats.bySurface ?? {})) {
+        stats.bySurface[key].originalTokens = Math.round(stats.bySurface[key].originalTokens * 0.1)
+        stats.bySurface[key].filteredTokens = Math.round(stats.bySurface[key].filteredTokens * 0.1)
+      }
+    }
     saveStats(stats)
+
+    // Inline token savings display (disabled by default for long sessions, enable with OC_FILTER_VERBOSE=1)
+    if (process.env["OC_FILTER_VERBOSE"] === "1") {
+      const savedTokens = estimateTokens(rawOutput) - estimateTokens(finalOutput)
+      const pct = filterResult.savedPct
+      const badge = pct >= 50 ? "✓" : pct >= 25 ? "○" : "•"
+      process.stderr.write(`\x1b[90m[token-optimizer] ${badge} ${pct}% saved (${savedTokens.toLocaleString()} tokens)\x1b[0m\n`)
+    }
 
     if (process.env["OC_FILTER_DEBUG"] === "1") {
       process.stderr.write(`[oc-filter] ${fullCommand.slice(0, 50)} → ${filterResult.savedPct}% saved\n`)

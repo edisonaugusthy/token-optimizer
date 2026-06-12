@@ -19,6 +19,7 @@ main() {
 
 REPO="edisonaugusthy/token-optimizer"
 CONFIG_DIR="$HOME/.config/token-optimizer"
+BIN_DIR="$HOME/.local/bin"
 SKIP_CONFIG=false
 RESET_STATS=false
 UNINSTALL=false
@@ -35,6 +36,8 @@ for arg in "$@"; do
         --reset-stats)   RESET_STATS=true ;;
         --uninstall)     UNINSTALL=true ;;
         --dir=*)         CONFIG_DIR="${arg#--dir=}" ;;
+        --bin-dir=*)     BIN_DIR="${arg#--bin-dir=}" ;;
+        --bin-dir)       shift; BIN_DIR="${1:-$BIN_DIR}" ;;
         --skip-config)   SKIP_CONFIG=true ;;
         --help|-h)
             cat << 'EOF'
@@ -47,6 +50,7 @@ Options:
   --reset-stats    Clear token statistics
   --uninstall      Remove token-optimizer
   --dir PATH       Install directory (default: ~/.config/token-optimizer)
+  --bin-dir PATH   Command directory (default: ~/.local/bin)
   --skip-config    Skip automatic agent configuration
   --help           Show this help
 
@@ -77,7 +81,7 @@ create_agents_md() {
     cat > "$file" << 'AGENTEOF'
 # token-optimizer — Agent Instructions
 
-This project uses a token filter to reduce LLM context usage by 60-75%.
+This project uses a token filter to reduce noisy tool output before it reaches the agent.
 
 ## Token Optimization Rules
 
@@ -229,6 +233,10 @@ if [ "$UNINSTALL" = true ]; then
     else
         warn "Token-optimizer not installed at $CONFIG_DIR"
     fi
+    if [ -f "$BIN_DIR/token-optimizer" ]; then
+        rm -f "$BIN_DIR/token-optimizer"
+        success "Removed $BIN_DIR/token-optimizer"
+    fi
     
     success "Token-optimizer uninstalled"
     exit 0
@@ -250,6 +258,7 @@ echo ""
 
 # Create config directory
 mkdir -p "$CONFIG_DIR"
+mkdir -p "$BIN_DIR"
 
 # Download filter.js
 FILTER_URL="${TO_DOWNLOAD_URL}/scripts/filter.js"
@@ -271,6 +280,47 @@ if node "$FILTER_DEST" --version &>/dev/null; then
     success "filter.js verified successfully"
 else
     warn "Could not verify filter.js (non-fatal)"
+fi
+
+TOKEN_OPTIMIZER_BIN="$BIN_DIR/token-optimizer"
+cat > "$TOKEN_OPTIMIZER_BIN" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_DIR="${TOKEN_OPTIMIZER_HOME:-$HOME/.config/token-optimizer}"
+FILTER="$CONFIG_DIR/filter.js"
+
+status() {
+    echo "token-optimizer - status"
+    echo "Filter path: $FILTER"
+    if [ -f "$FILTER" ]; then
+        echo "Filter exists: yes"
+        echo
+        node "$FILTER" stats
+    else
+        echo "Filter exists: no"
+        echo "Run the installer again to restore filter.js."
+        exit 1
+    fi
+}
+
+case "${1:-status}" in
+    status) status ;;
+    stats) node "$FILTER" stats ;;
+    reset-stats) node "$FILTER" reset-stats ;;
+    run|filter) shift; node "$FILTER" "$@" ;;
+    install|update)
+        echo "The shell installer already installed the local command filter."
+        echo "For MCP agent config, run: npm install -g token-optimizer && token-optimizer install"
+        ;;
+    *) node "$FILTER" "$@" ;;
+esac
+EOF
+chmod +x "$TOKEN_OPTIMIZER_BIN"
+success "Installed command: $TOKEN_OPTIMIZER_BIN"
+if ! command -v token-optimizer >/dev/null 2>&1; then
+    warn "$BIN_DIR is not on PATH for this shell."
+    warn "Add this to your shell rc file: export PATH=\"$BIN_DIR:\$PATH\""
 fi
 
 # Configure agents
@@ -337,6 +387,9 @@ echo ""
 success "Installation complete!"
 echo ""
 echo "Usage:"
+echo "  token-optimizer                  # status"
+echo "  token-optimizer stats            # token totals"
+echo "  token-optimizer run <command>     # filter one command"
 echo "  node ~/.config/token-optimizer/filter.js <command>"
 echo ""
 echo "Commands:"
